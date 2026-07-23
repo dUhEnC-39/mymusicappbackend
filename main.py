@@ -42,35 +42,34 @@ def download_song(spotify_url: str, background_tasks: BackgroundTasks):
     Takes a Spotify URL, downloads the MP3, and returns a playable link.
     Also triggers a background cleanup of old files.
     """
-    # 1. Trigger the background cleanup so it runs silently without making the user wait
     background_tasks.add_task(cleanup_old_files)
     
     try:
-        # 2. Clean the URL (removes tracking data like "?si=...")
+        # 1. Clean the URL
         clean_url = spotify_url.split("?")[0]
         
-        # 3. Extract the unique track ID to use as the file name
+        # 2. Extract the unique track ID 
         track_id = clean_url.split("/")[-1]
         
         file_name = f"{track_id}.mp3"
         file_path = os.path.join(CACHE_DIR, file_name)
         
-        # 4. Only run the download if we haven't already downloaded this exact song
+        # 3. Only run the download if it's not already in the cache
         if not os.path.exists(file_path):
-            # Run the spotDL command using the exact file path
+            # Give spotDL exactly what it wants: the {track-id} variable!
             subprocess.run([
-                "spotdl",  
+                "spotdl", 
+                "download", 
                 clean_url, 
                 "--format", "mp3", 
-                "--output", file_path 
+                "--output", f"{CACHE_DIR}/{{track-id}}.mp3"
             ], check=True)
         
-        # 5. Return the public URL that Thunkable will use to play the song
+        # Return the public URL
         return {
             "status": "ready",
             "audio_url": f"https://mymusicappbackend.onrender.com/audio/{file_name}"
         }
         
     except Exception as e:
-        # If anything crashes, catch the error and send it back so we can see it
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
