@@ -10,13 +10,14 @@ app = FastAPI()
 CACHE_DIR = "music_cache"
 MAX_FILE_AGE_SECONDS = 3600  # 1 hour (60 minutes * 60 seconds)
 
-# Create cache directory and mount it
+# Create cache directory and mount it so Thunkable can access the MP3s
 os.makedirs(CACHE_DIR, exist_ok=True)
 app.mount("/audio", StaticFiles(directory=CACHE_DIR), name="audio")
 
 def cleanup_old_files():
     """
     Scans the music directory and deletes files older than MAX_FILE_AGE_SECONDS.
+    This keeps your free Render server from running out of storage space.
     """
     now = time.time()
     for filename in os.listdir(CACHE_DIR):
@@ -41,34 +42,36 @@ def download_song(spotify_url: str, background_tasks: BackgroundTasks):
     Takes a Spotify URL, downloads the MP3, and returns a playable link.
     Also triggers a background cleanup of old files.
     """
+    # 1. Trigger the background cleanup so it runs silently without making the user wait
     background_tasks.add_task(cleanup_old_files)
     
     try:
-        # 1. Clean the URL! This chops off the "?si=" tracking garbage
+        # 2. Clean the URL (removes tracking data like "?si=...")
         clean_url = spotify_url.split("?")[0]
         
-        # 2. Extract the unique track ID from the clean URL
+        # 3. Extract the unique track ID to use as the file name
         track_id = clean_url.split("/")[-1]
         
         file_name = f"{track_id}.mp3"
         file_path = os.path.join(CACHE_DIR, file_name)
         
-        # Only download if it's not already in the cache
+        # 4. Only run the download if we haven't already downloaded this exact song
         if not os.path.exists(file_path):
-            # 3. Run the spotDL command WITHOUT the word "download"
+            # Run the spotDL command using the exact file path
             subprocess.run([
                 "spotdl", 
+                "download", 
                 clean_url, 
                 "--format", "mp3", 
-                "--output", f"{CACHE_DIR}/{{track-id}}.{{ext}}"
+                "--output", file_path 
             ], check=True)
         
-        # Return the public URL
+        # 5. Return the public URL that Thunkable will use to play the song
         return {
             "status": "ready",
             "audio_url": f"https://mymusicappbackend.onrender.com/audio/{file_name}"
         }
         
     except Exception as e:
+        # If anything crashes, catch the error and send it back so we can see it
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
-
