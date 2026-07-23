@@ -59,8 +59,7 @@ def download_song(spotify_url: str, background_tasks: BackgroundTasks):
         if not os.path.exists(file_path):
             # Run the spotDL command using the exact file path
             subprocess.run([
-                "spotdl", 
-                "download", 
+                "spotdl",  
                 clean_url, 
                 "--format", "mp3", 
                 "--output", file_path 
