@@ -41,22 +41,24 @@ def download_song(spotify_url: str, background_tasks: BackgroundTasks):
     Takes a Spotify URL, downloads the MP3, and returns a playable link.
     Also triggers a background cleanup of old files.
     """
-    # 1. Tell FastAPI to run the cleanup function in the background
     background_tasks.add_task(cleanup_old_files)
     
     try:
-        # Extract the unique Spotify track ID from the URL
-        track_id = spotify_url.split("/")[-1].split("?")[0]
+        # 1. Clean the URL! This chops off the "?si=" tracking garbage
+        clean_url = spotify_url.split("?")[0]
+        
+        # 2. Extract the unique track ID from the clean URL
+        track_id = clean_url.split("/")[-1]
         
         file_name = f"{track_id}.mp3"
         file_path = os.path.join(CACHE_DIR, file_name)
         
         # Only download if it's not already in the cache
         if not os.path.exists(file_path):
+            # 3. Run the spotDL command WITHOUT the word "download"
             subprocess.run([
                 "spotdl", 
-                "download", 
-                spotify_url, 
+                clean_url, 
                 "--format", "mp3", 
                 "--output", f"{CACHE_DIR}/{{track-id}}.{{ext}}"
             ], check=True)
@@ -64,8 +66,9 @@ def download_song(spotify_url: str, background_tasks: BackgroundTasks):
         # Return the public URL
         return {
             "status": "ready",
-            "audio_url": f"https://your-api-name.onrender.com/audio/{file_name}"
+            "audio_url": f"https://mymusicappbackend.onrender.com/audio/{file_name}"
         }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+
