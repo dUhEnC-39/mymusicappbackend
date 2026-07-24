@@ -1,4 +1,6 @@
 fastapi
 uvicorn
 spotdl
+sacad
 mutagen
+yt-dlp>=2025.1.1
