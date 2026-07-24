@@ -4,7 +4,6 @@ import time
 import shutil
 import re
 import subprocess
-import base64
 import requests
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.staticfiles import StaticFiles
@@ -78,62 +77,88 @@ def get_itunes_info(search_query: str):
 
     return song_title, artist_name, cover_bytes
 
-def download_with_ytdlp(search_query: str, temp_dir: str):
+def download_via_piped_proxy(search_query: str, output_mp3_path: str):
     """
-    Downloads high-res audio via yt-dlp.
-    Searches 5 items per source, filtering out DRM-protected preview clips automatically.
+    Fetches direct YouTube audio stream URLs via public Piped API instances.
+    Bypasses BotGuard, cookies, and local IP blocks completely.
     """
-    output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
-    cookie_path = os.path.join(temp_dir, "youtube_cookies.txt")
+    print(f"--- [PROXY ENGINE] Searching Piped instances for '{search_query}' ---", flush=True)
     
-    b64_cookies = os.getenv("YOUTUBE_COOKIES_B64")
-    has_cookies = False
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
 
-    if b64_cookies:
-        try:
-            decoded_bytes = base64.b64decode(b64_cookies.strip())
-            with open(cookie_path, "wb") as f:
-                f.write(decoded_bytes)
-            has_cookies = True
-            print(f"Loaded Base64 cookie file ({os.path.getsize(cookie_path)} bytes).", flush=True)
-        except Exception as cookie_err:
-            print(f"Cookie notice: {cookie_err}", flush=True)
-
-    # Search depth of 5 results with DRM & duration filtering
-    search_targets = [
-        ("soundcloud", f"scsearch5:{search_query}"),
-        ("youtube", f"ytsearch5:{search_query}")
+    piped_instances = [
+        "https://api.piped.private.coffee",
+        "https://pipedapi.p34.eu",
+        "https://pipedapi.drgns.space",
+        "https://pipedapi.mha.fi"
     ]
 
-    for source_name, target_url in search_targets:
-        print(f"--- [YT-DLP] Attempting source: {source_name} ---", flush=True)
-        
-        ytdlp_cmd = [
-            sys.executable, "-m", "yt_dlp",
-            target_url,
-            "-x",
-            "--audio-format", "mp3",
-            "--audio-quality", "0",
-            "-o", output_template,
-            "--no-playlist",
-            "--match-filter", "!drm & duration > 60"
-        ]
+    for api_base in piped_instances:
+        try:
+            print(f"Querying Piped instance: {api_base}...", flush=True)
+            search_url = f"{api_base}/search?q={requests.utils.quote(search_query)}&filter=music_songs"
+            res = requests.get(search_url, headers=headers, timeout=6)
+            
+            if res.status_code != 200:
+                continue
+            
+            items = res.json().get("items", [])
+            if not items:
+                # Try unfiltered search if music search yields nothing
+                res = requests.get(f"{api_base}/search?q={requests.utils.quote(search_query)}&filter=all", headers=headers, timeout=6)
+                items = res.json().get("items", []) if res.status_code == 200 else []
 
-        if source_name == "youtube" and has_cookies:
-            ytdlp_cmd.extend(["--cookies", cookie_path, "--extractor-args", "youtube:player_client=web,mweb"])
+            if not items:
+                continue
 
-        print(f"Executing command: {' '.join(ytdlp_cmd)}", flush=True)
-        res = subprocess.run(ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+            video_id = items[0]["url"].replace("/watch?v=", "")
+            print(f"Found Video ID '{video_id}' on {api_base}", flush=True)
 
-        if res.stdout:
-            print(f"[{source_name} stdout]:\n{res.stdout.strip()}", flush=True)
-        if res.stderr:
-            print(f"[{source_name} stderr]:\n{res.stderr.strip()}", flush=True)
+            stream_res = requests.get(f"{api_base}/streams/{video_id}", headers=headers, timeout=8)
+            if stream_res.status_code != 200:
+                continue
 
-        mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
-        if res.returncode == 0 and mp3_files:
-            print(f"Successfully downloaded audio track via {source_name}!", flush=True)
-            return True
+            audio_streams = stream_res.json().get("audioStreams", [])
+            if not audio_streams:
+                continue
+
+            # Sort by highest bitrate stream
+            audio_streams.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
+            direct_stream_url = audio_streams[0]["url"]
+
+            print(f"Downloading stream directly to MP3...", flush=True)
+            
+            # Use ffmpeg if available to convert stream directly to high-quality MP3
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-headers", "User-Agent: Mozilla/5.0\r\n",
+                "-i", direct_stream_url,
+                "-vn", "-ar", "44100", "-ac", "2", "-b:a", "192k",
+                output_mp3_path
+            ]
+            
+            ffmpeg_res = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45)
+            
+            if ffmpeg_res.returncode == 0 and os.path.exists(output_mp3_path) and os.path.getsize(output_mp3_path) > 100000:
+                print(f"--- [SUCCESS] Piped Proxy Engine downloaded MP3 successfully! ---", flush=True)
+                return True
+
+            # Fallback: Raw stream write if ffmpeg conversion had an issue
+            with requests.get(direct_stream_url, headers=headers, stream=True, timeout=30) as stream_response:
+                if stream_response.status_code == 200:
+                    with open(output_mp3_path, "wb") as f:
+                        for chunk in stream_response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    
+                    if os.path.exists(output_mp3_path) and os.path.getsize(output_mp3_path) > 100000:
+                        print("--- [SUCCESS] Stream saved directly to file! ---", flush=True)
+                        return True
+
+        except Exception as e:
+            print(f"Piped instance error on {api_base}: {e}", flush=True)
+            continue
 
     return False
 
@@ -158,35 +183,33 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             print("Saved 1000x1000 iTunes cover art to cache!", flush=True)
 
         # 2. Build search query
-        yt_search_term = f"{artist_name} {song_title}" if artist_name != "Unknown Artist" else search_query
+        clean_search_term = f"{artist_name} {song_title}" if artist_name != "Unknown Artist" else search_query
 
-        # 3. Run download engine
-        download_success = download_with_ytdlp(yt_search_term, temp_dir)
+        # 3. Download via Piped Proxy Engine (No cookies or BotGuard required)
+        temp_mp3 = os.path.join(temp_dir, "downloaded_track.mp3")
+        download_success = download_via_piped_proxy(clean_search_term, temp_mp3)
 
-        downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
-        if not download_success or not downloaded_files:
-            print("--- [ERROR] All download attempts failed ---", flush=True)
+        if not download_success or not os.path.exists(temp_mp3):
+            print("--- [ERROR] All download engines failed ---", flush=True)
             with open(failed_marker, "w") as f:
                 f.write("Download failed")
             return
 
-        downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
-        
-        # 4. Write ID3 tags directly to MP3
+        # 4. Write clean ID3 tags directly to MP3
         try:
             try:
-                tags = ID3(downloaded_mp3_path)
+                tags = ID3(temp_mp3)
             except ID3NoHeaderError:
                 tags = ID3()
             tags.add(TIT2(encoding=3, text=song_title))
             tags.add(TPE1(encoding=3, text=artist_name))
-            tags.save(downloaded_mp3_path)
+            tags.save(temp_mp3)
             print("Successfully embedded clean ID3 tags into MP3!", flush=True)
         except Exception as e:
             print(f"ID3 write notice: {e}", flush=True)
 
         # 5. Move finished MP3 to primary cache directory
-        shutil.move(downloaded_mp3_path, audio_path)
+        shutil.move(temp_mp3, audio_path)
         print(f"--- [SUCCESS] Song processing complete! Saved to {audio_path} ---", flush=True)
 
     except Exception as e:
