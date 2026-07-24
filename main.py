@@ -4,7 +4,6 @@ import time
 import shutil
 import re
 import subprocess
-import requests
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,25 +51,23 @@ def get_existing_cover(file_id: str):
             return f"{file_id}{ext}"
     return None
 
-def download_with_ytdlp_ios(search_query: str, temp_dir: str):
+def download_with_ytdlp(search_query: str, temp_dir: str):
     """
-    Primary YouTube engine using iOS/Android client spoofing and mobile headers.
-    Bypasses YouTube's datacenter IP bot-check cleanly.
+    Downloads high-res audio using yt-dlp with Mobile Web / Android client spoofing.
+    Fixes '0 items found' search bugs while keeping bot-check bypass active.
     """
     print(f"--- [YT-DLP ENGINE] Searching YouTube for '{search_query}' ---", flush=True)
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     
-    # iOS User-Agent and player client configuration
     ytdlp_cmd = [
         sys.executable, "-m", "yt_dlp",
-        f"ytsearch1:{search_query} audio",
+        f"ytsearch1:{search_query}",
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", "0",  # Highest VBR MP3 quality (~250-320 kbps)
         "-o", output_template,
         "--no-playlist",
-        "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-        "--extractor-args", "youtube:player_client=ios,android,mweb"
+        "--extractor-args", "youtube:player_client=mweb,android"
     ]
     
     print(f"Executing: {' '.join(ytdlp_cmd)}", flush=True)
@@ -100,8 +97,8 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception:
                 pass
 
-        # 2. Execute yt-dlp with iOS mobile client spoofing
-        download_success = download_with_ytdlp_ios(search_query, temp_dir)
+        # 2. Execute yt-dlp with mobile web search spoofing
+        download_success = download_with_ytdlp(search_query, temp_dir)
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if not download_success or not downloaded_files:
