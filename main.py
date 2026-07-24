@@ -79,10 +79,7 @@ def get_itunes_info(search_query: str):
 
 def resolve_youtube_video_id(search_query: str):
     """
-    Multi-layer Video ID resolver.
-    Layer 1: Scrapes YouTube search HTML directly.
-    Layer 2: Fast queries on public proxy APIs.
-    Layer 3: yt-dlp flat playlist search fallback.
+    Resolves YouTube Video ID directly by scraping YouTube search HTML.
     """
     print(f"--- [RESOLVER] Resolving YouTube Video ID for '{search_query}' ---", flush=True)
     headers = {
@@ -90,7 +87,6 @@ def resolve_youtube_video_id(search_query: str):
         "Accept-Language": "en-US,en;q=0.9"
     }
 
-    # Method 1: YouTube Search HTML Direct Scraping
     try:
         yt_search_url = f"https://www.youtube.com/results?search_query={requests.utils.quote(search_query)}"
         res = requests.get(yt_search_url, headers=headers, timeout=5)
@@ -99,41 +95,12 @@ def resolve_youtube_video_id(search_query: str):
             if matches:
                 valid_ids = [m for m in matches if len(m) == 11]
                 if valid_ids:
-                    print(f"--- [RESOLVER SUCCESS] Resolved Video ID '{valid_ids[0]}' via YouTube Search ---", flush=True)
+                    print(f"--- [RESOLVER SUCCESS] Resolved Video ID '{valid_ids[0]}' ---", flush=True)
                     return valid_ids[0]
     except Exception as e:
         print(f"YouTube HTML search notice: {e}", flush=True)
 
-    # Method 2: Public Proxy APIs (Fast Timeout)
-    proxy_nodes = [
-        "https://inv.tux.pizza",
-        "https://invidious.nerdvpn.de",
-        "https://api.piped.private.coffee"
-    ]
-    for base_url in proxy_nodes:
-        try:
-            if "piped" in base_url:
-                api_url = f"{base_url}/search?q={requests.utils.quote(search_query)}&filter=music_songs"
-            else:
-                api_url = f"{base_url}/api/v1/search?q={requests.utils.quote(search_query)}&type=video"
-
-            res = requests.get(api_url, headers=headers, timeout=3)
-            if res.status_code == 200:
-                data = res.json()
-                if isinstance(data, dict) and "items" in data and data["items"]:
-                    v_id = data["items"][0].get("url", "").replace("/watch?v=", "")
-                    if len(v_id) == 11:
-                        print(f"--- [RESOLVER SUCCESS] Resolved Video ID '{v_id}' via {base_url} ---", flush=True)
-                        return v_id
-                elif isinstance(data, list) and data:
-                    v_id = data[0].get("videoId")
-                    if v_id and len(v_id) == 11:
-                        print(f"--- [RESOLVER SUCCESS] Resolved Video ID '{v_id}' via {base_url} ---", flush=True)
-                        return v_id
-        except Exception:
-            continue
-
-    # Method 3: yt-dlp Flat Playlist Search
+    # Fallback to yt-dlp flat playlist search
     try:
         cmd = [
             sys.executable, "-m", "yt_dlp",
@@ -145,7 +112,7 @@ def resolve_youtube_video_id(search_query: str):
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
         v_id = res.stdout.strip()
         if res.returncode == 0 and len(v_id) == 11 and re.match(r'^[a-zA-Z0-9_-]{11}$', v_id):
-            print(f"--- [RESOLVER SUCCESS] Resolved Video ID '{v_id}' via yt-dlp flat search ---", flush=True)
+            print(f"--- [RESOLVER SUCCESS] Resolved Video ID '{v_id}' via flat search ---", flush=True)
             return v_id
     except Exception as e:
         print(f"yt-dlp flat search notice: {e}", flush=True)
@@ -153,16 +120,22 @@ def resolve_youtube_video_id(search_query: str):
     return None
 
 def download_via_cobalt(youtube_url: str, output_mp3_path: str):
-    """Downloads audio stream using Cobalt API."""
+    """Downloads audio stream using Cobalt API with browser origin headers."""
     print(f"--- [COBALT ENGINE] Processing '{youtube_url}' ---", flush=True)
+    
     cobalt_instances = [
-        "https://api.cobalt.tools/"
+        "https://api.cobalt.tools/",
+        "https://cobalt-api.kwippy.com/"
     ]
+    
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Origin": "https://cobalt.tools",
+        "Referer": "https://cobalt.tools/"
     }
+    
     payload = {
         "url": youtube_url,
         "downloadMode": "audio",
@@ -171,7 +144,8 @@ def download_via_cobalt(youtube_url: str, output_mp3_path: str):
 
     for api_url in cobalt_instances:
         try:
-            res = requests.post(api_url, json=payload, headers=headers, timeout=12)
+            print(f"Querying Cobalt node: {api_url}...", flush=True)
+            res = requests.post(api_url, json=payload, headers=headers, timeout=10)
             if res.status_code == 200:
                 data = res.json()
                 status = data.get("status")
@@ -197,34 +171,39 @@ def download_via_cobalt(youtube_url: str, output_mp3_path: str):
                             if os.path.exists(output_mp3_path) and os.path.getsize(output_mp3_path) > 100000:
                                 print("--- [SUCCESS] Downloaded audio via Cobalt API! ---", flush=True)
                                 return True
+            else:
+                print(f"Cobalt node {api_url} returned HTTP {res.status_code}", flush=True)
         except Exception as e:
             print(f"Cobalt notice on {api_url}: {e}", flush=True)
 
     return False
 
 def download_via_proxy_stream(video_id: str, output_mp3_path: str):
-    """Fallback: Downloads adaptive audio stream directly from proxy instances."""
+    """Fallback: Transcodes audio stream directly from active proxy instances."""
     print(f"--- [PROXY STREAM ENGINE] Fetching stream for Video ID '{video_id}' ---", flush=True)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     nodes = [
-        "https://inv.tux.pizza",
+        "https://inv.nadeko.net",
+        "https://invidious.no-kyc.net",
         "https://invidious.nerdvpn.de",
         "https://api.piped.private.coffee"
     ]
+    
     for base in nodes:
         try:
+            print(f"Testing stream node: {base}...", flush=True)
             stream_url = None
             if "piped" in base:
-                res = requests.get(f"{base}/streams/{video_id}", headers=headers, timeout=5)
+                res = requests.get(f"{base}/streams/{video_id}", headers=headers, timeout=3)
                 if res.status_code == 200:
                     audio_streams = res.json().get("audioStreams", [])
                     if audio_streams:
                         audio_streams.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
                         stream_url = audio_streams[0]["url"]
             else:
-                res = requests.get(f"{base}/api/v1/videos/{video_id}", headers=headers, timeout=5)
+                res = requests.get(f"{base}/api/v1/videos/{video_id}", headers=headers, timeout=3)
                 if res.status_code == 200:
                     formats = res.json().get("adaptiveFormats", [])
                     audio_streams = [f for f in formats if f.get("type", "").startswith("audio/")]
@@ -250,18 +229,18 @@ def download_via_proxy_stream(video_id: str, output_mp3_path: str):
     return False
 
 def download_via_soundcloud(search_query: str, temp_dir: str):
-    """Fallback: Downloads audio from SoundCloud skipping DRM tracks."""
+    """Fallback: Downloads audio from SoundCloud deep search."""
     print(f"--- [SOUNDCLOUD ENGINE] Searching SoundCloud for '{search_query}' ---", flush=True)
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     cmd = [
         sys.executable, "-m", "yt_dlp",
-        f"scsearch5:{search_query}",
+        f"scsearch10:{search_query}",
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", "0",
         "-o", output_template,
         "--no-playlist",
-        "--match-filter", "!drm & duration > 60"
+        "--match-filter", "!drm & duration > 30"
     ]
     try:
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45)
@@ -304,7 +283,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         if video_id:
             youtube_url = f"https://www.youtube.com/watch?v={video_id}"
 
-            # Engine 1: Cobalt API
+            # Engine 1: Cobalt API (with browser origin headers)
             download_success = download_via_cobalt(youtube_url, temp_mp3)
 
             # Engine 2: Direct Proxy Stream Transcode
@@ -312,7 +291,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
                 print("Cobalt engine missed. Switching to Proxy Stream Engine...", flush=True)
                 download_success = download_via_proxy_stream(video_id, temp_mp3)
 
-        # Engine 3: SoundCloud Fallback
+        # Engine 3: SoundCloud Deep Search Fallback
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if not download_success or not downloaded_files:
             print("YouTube engines missed. Switching to SoundCloud Engine...", flush=True)
@@ -386,33 +365,3 @@ def download_song(song: str, background_tasks: BackgroundTasks, request: Request
             artist_name = "Unknown Artist"
             try:
                 tags = ID3(audio_path)
-                song_title = str(tags.get("TIT2", query.title()))
-                artist_name = str(tags.get("TPE1", "Unknown Artist"))
-            except Exception:
-                pass
-
-            return {
-                "status": "ready",
-                "audio_url": f"{base_url}/audio/{audio_file_name}",
-                "cover_url": cover_url,
-                "song_name": song_title,
-                "artist": artist_name
-            }
-
-        # 2. Always wipe stale failed markers on new incoming requests
-        if os.path.exists(failed_marker):
-            os.remove(failed_marker)
-
-        # 3. Queue download task
-        temp_dir = os.path.join(CACHE_DIR, f"temp_{file_id}")
-        if not os.path.exists(temp_dir):
-            os.makedirs(temp_dir, exist_ok=True)
-            background_tasks.add_task(run_media_download_background, clean_query, temp_dir, audio_path, file_id)
-
-        return {
-            "status": "processing",
-            "message": "Song and cover art are processing. Try again in 10-15 seconds."
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
