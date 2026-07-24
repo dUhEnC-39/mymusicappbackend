@@ -52,24 +52,42 @@ def get_existing_cover(file_id: str):
     return None
 
 def download_with_ytdlp(search_query: str, temp_dir: str):
-    """Bypasses cloud bot checks using YouTube's TV Embedded client for max audio quality."""
+    """Downloads high-res audio using yt-dlp with YouTube cookie authentication & Smart TV bypass."""
     print(f"--- [HIGH-QUAL ENGINE] Fetching high-res audio via yt-dlp for '{search_query}' ---", flush=True)
     
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
+    cookie_file_path = os.path.join(temp_dir, "youtube_cookies.txt")
     
-    # Force 'tv_embedded' & 'web_creator' client spoofing to completely bypass bot sign-in requirements
+    # 1. Read YOUTUBE_COOKIES from Northflank environment variables if set
+    yt_cookies_data = os.getenv("YOUTUBE_COOKIES")
+    use_cookies = False
+    
+    if yt_cookies_data:
+        try:
+            with open(cookie_file_path, "w", encoding="utf-8") as f:
+                f.write(yt_cookies_data.strip())
+            use_cookies = True
+            print("Successfully wrote YouTube authentication cookies to disk.", flush=True)
+        except Exception as cookie_err:
+            print(f"Failed to write cookie file: {cookie_err}", flush=True)
+
+    # 2. Build yt-dlp command with Smart TV client spoofing and max audio quality
     ytdlp_cmd = [
         sys.executable, "-m", "yt_dlp",
         f"ytsearch1:{search_query} audio",
         "-x",
         "--audio-format", "mp3",
-        "--audio-quality", "0",  # Highest VBR MP3 quality (~250-320 kbps)
+        "--audio-quality", "0",  # Highest VBR quality (~250-320 kbps)
         "-o", output_template,
         "--no-playlist",
         "--extractor-args", "youtube:player_client=tv_embedded,web_creator"
     ]
+
+    # Attach cookies flag if environment variable was present
+    if use_cookies:
+        ytdlp_cmd.extend(["--cookies", cookie_file_path])
     
-    print(f"Executing yt-dlp (Smart TV Bypass): {' '.join(ytdlp_cmd)}", flush=True)
+    print(f"Executing yt-dlp: {' '.join(ytdlp_cmd)}", flush=True)
     res = subprocess.run(ytdlp_cmd, stdout=None, stderr=None, timeout=60)
     
     if res.returncode == 0 and any(f.endswith(".mp3") for f in os.listdir(temp_dir)):
@@ -98,7 +116,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
 
         download_success = False
 
-        # 2. Try spotDL with a tight 10-second timeout
+        # 2. Try spotDL with a strict 10-second timeout
         download_cmd = [
             sys.executable, "-m", "spotdl", 
             search_query,
@@ -119,9 +137,9 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
                 download_success = True
                 print("spotDL download successful!", flush=True)
         except Exception:
-            print("spotDL hit limit or timed out. Switching to Smart TV YouTube engine...", flush=True)
+            print("spotDL hit limit or timed out. Switching to yt-dlp engine...", flush=True)
 
-        # 3. Use Smart TV yt-dlp bypass engine
+        # 3. Fallback to yt-dlp engine with cookie & TV bypass support
         if not download_success:
             download_success = download_with_ytdlp(search_query, temp_dir)
 
