@@ -52,11 +52,11 @@ def get_existing_cover(file_id: str):
     return None
 
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
-    """Downloads audio, extracts metadata, and fetches 1000x1000 cover art via SACAD."""
+    """Downloads audio with a strict timeout to prevent silent freezing."""
     try:
         print(f"--- [START] Processing search query: '{search_query}' ---", flush=True)
         
-        # 1. Correct spotDL argument: --output-format mp3
+        # 1. spotDL command with specific audio provider and output format
         download_cmd = [
             sys.executable, "-m", "spotdl", 
             "download", 
@@ -66,11 +66,20 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         
         print(f"Executing command: {' '.join(download_cmd)}", flush=True)
         
-        # Stream logs directly to console
-        result = subprocess.run(download_cmd, cwd=temp_dir, stdout=None, stderr=None)
-        
-        if result.returncode != 0:
-            print(f"--- [ERROR] spotDL process returned non-zero code: {result.returncode} ---", flush=True)
+        # Added timeout=90 to kill hung processes after 90 seconds
+        try:
+            result = subprocess.run(
+                download_cmd, 
+                cwd=temp_dir, 
+                stdout=None, 
+                stderr=None, 
+                timeout=90
+            )
+            if result.returncode != 0:
+                print(f"--- [ERROR] spotDL exited with code: {result.returncode} ---", flush=True)
+                return
+        except subprocess.TimeoutExpired:
+            print("--- [TIMEOUT] spotDL hung for over 90 seconds and was terminated. ---", flush=True)
             return
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
@@ -106,7 +115,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
                     cover_output_path
                 ]
                 print("Running SACAD for high-res artwork...", flush=True)
-                sacad_res = subprocess.run(sacad_cmd, stdout=None, stderr=None)
+                sacad_res = subprocess.run(sacad_cmd, stdout=None, stderr=None, timeout=30)
                 if sacad_res.returncode == 0 and os.path.exists(cover_output_path):
                     print("SACAD successfully downloaded 1000x1000 cover art!", flush=True)
             except Exception as sacad_err:
@@ -125,7 +134,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception as embed_err:
                 print(f"Embedded art fallback error: {embed_err}", flush=True)
 
-        # 4. Move final MP3 to cache directory
+        # 4. Move final MP3 to primary cache directory
         shutil.move(downloaded_mp3_path, audio_path)
         print(f"--- [SUCCESS] Song processing complete! Saved to {audio_path} ---", flush=True)
 
@@ -133,6 +142,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         print(f"--- [CRASH] Background Download Exception: {e} ---", flush=True)
 
     finally:
+        # Clean up temp directory so the API doesn't get permanently stuck
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
 # --- ENDPOINTS ---
