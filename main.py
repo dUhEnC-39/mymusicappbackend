@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from mutagen.id3 import ID3, APIC, ID3NoHeaderError, TIT2, TPE1
+import base64
 
 # Force Python unbuffered logging so prints stream live to Northflank logs
 os.environ["PYTHONUNBUFFERED"] = "1"
@@ -79,32 +80,25 @@ def get_itunes_info(search_query: str):
 
 def download_with_ytdlp(search_query: str, temp_dir: str):
     """
-    Downloads high-res audio via yt-dlp.
-    Un-escapes tab and newline formatting from Northflank environment variables.
+    Downloads high-res audio via yt-dlp by decoding Base64 cookies string onto disk.
     """
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     cookie_path = os.path.join(temp_dir, "youtube_cookies.txt")
     
-    cookies_data = os.getenv("YOUTUBE_COOKIES")
+    b64_cookies = os.getenv("YOUTUBE_COOKIES_B64")
     has_cookies = False
 
-    if cookies_data:
+    if b64_cookies:
         try:
-            # Unescape newlines (\n) and tabs (\t) passed from Northflank env var
-            formatted = cookies_data.replace("\\n", "\n").replace("\\t", "\t").replace("\r\n", "\n").strip()
+            # Decode Base64 string back into the exact original cookies.txt file
+            decoded_bytes = base64.b64decode(b64_cookies.strip())
+            with open(cookie_path, "wb") as f:
+                f.write(decoded_bytes)
             
-            # Ensure proper Netscape cookie header
-            if not formatted.startswith("#"):
-                formatted = "# Netscape HTTP Cookie File\n" + formatted
-
-            with open(cookie_path, "w", encoding="utf-8") as f:
-                f.write(formatted)
-            
-            valid_entries = [line for line in formatted.splitlines() if line.strip() and not line.startswith("#")]
             has_cookies = True
-            print(f"Successfully unescaped cookie file: {len(valid_entries)} active cookie entries loaded.", flush=True)
+            print(f"Successfully decoded Base64 cookie file to disk! ({os.path.getsize(cookie_path)} bytes)", flush=True)
         except Exception as cookie_err:
-            print(f"Cookie formatting notice: {cookie_err}", flush=True)
+            print(f"Base64 cookie decoding error: {cookie_err}", flush=True)
 
     ytdlp_cmd = [
         sys.executable, "-m", "yt_dlp",
