@@ -79,22 +79,17 @@ def get_itunes_info(search_query: str):
 
 def download_with_ytdlp(search_query: str, temp_dir: str):
     """
-    Downloads high-res audio via yt-dlp.
-    Sanitizes Northflank environment variable newlines into a valid Netscape cookie file.
+    Downloads high-res audio via yt-dlp with sanitized cookies and mweb/ios client fallback.
     """
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     cookie_path = os.path.join(temp_dir, "youtube_cookies.txt")
     
-    # Read and sanitize YOUTUBE_COOKIES environment variable
     cookies_data = os.getenv("YOUTUBE_COOKIES")
     has_cookies = False
 
     if cookies_data:
         try:
-            # Convert Northflank's escaped '\\n' strings into actual multi-line linebreaks
             formatted_cookies = cookies_data.replace("\\n", "\n").replace("\r\n", "\n").strip()
-            
-            # Ensure mandatory Netscape header is present at the top
             if not formatted_cookies.startswith("#"):
                 formatted_cookies = "# Netscape HTTP Cookie File\n" + formatted_cookies
 
@@ -103,7 +98,7 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
             
             line_count = len(formatted_cookies.splitlines())
             has_cookies = True
-            print(f"Successfully processed YouTube cookies! ({line_count} lines formatted)", flush=True)
+            print(f"Successfully formatted {line_count} lines of cookies.", flush=True)
         except Exception as cookie_err:
             print(f"Cookie formatting error: {cookie_err}", flush=True)
 
@@ -115,13 +110,13 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
         "--audio-quality", "0",
         "-o", output_template,
         "--no-playlist",
-        "--extractor-args", "youtube:player_client=web,mweb,ios"
+        "--extractor-args", "youtube:player_client=mweb,ios"
     ]
 
     if has_cookies:
         ytdlp_cmd.extend(["--cookies", cookie_path])
 
-    print(f"Executing yt-dlp: {' '.join(ytdlp_cmd)}", flush=True)
+    print(f"Executing yt-dlp command...", flush=True)
     res = subprocess.run(ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
 
     if res.stdout:
