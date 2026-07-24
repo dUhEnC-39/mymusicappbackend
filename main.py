@@ -7,39 +7,36 @@ from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
 
-# Configuration
 CACHE_DIR = "music_cache"
 MAX_FILE_AGE_SECONDS = 3600  # 1 hour
 
-# Create cache directory and mount it so Thunkable can access the MP3s
 os.makedirs(CACHE_DIR, exist_ok=True)
 app.mount("/audio", StaticFiles(directory=CACHE_DIR), name="audio")
 
 def cleanup_old_files():
-    """
-    Scans the music directory and deletes files older than MAX_FILE_AGE_SECONDS.
-    This keeps your free Render server from running out of storage space.
-    """
     now = time.time()
     for filename in os.listdir(CACHE_DIR):
         file_path = os.path.join(CACHE_DIR, filename)
-        
-        # Make sure it is a file, not a sub-directory
         if os.path.isfile(file_path):
-            file_age = now - os.path.getmtime(file_path)
-            
-            if file_age > MAX_FILE_AGE_SECONDS:
+            if (now - os.path.getmtime(file_path)) > MAX_FILE_AGE_SECONDS:
                 try:
                     os.remove(file_path)
-                    print(f"Deleted old file: {filename}")
-                except Exception as e:
+                except Exception:
                     pass
+
+def run_spotdl_background(clean_url: str, temp_dir: str, file_path: str):
+    """Downloads song in the background without blocking the API response."""
+    try:
+        subprocess.run(["spotdl", "download", clean_url], cwd=temp_dir, check=True)
+        downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
+        if downloaded_files:
+            shutil.move(os.path.join(temp_dir, downloaded_files[0]), file_path)
+    finally:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
 
 @app.get("/download-song")
 def download_song(spotify_url: str, background_tasks: BackgroundTasks):
-    """
-    Takes a Spotify URL, downloads the MP3, and returns a playable link.
-    """
     background_tasks.add_task(cleanup_old_files)
     
     try:
@@ -49,44 +46,25 @@ def download_song(spotify_url: str, background_tasks: BackgroundTasks):
         file_name = f"{track_id}.mp3"
         file_path = os.path.join(CACHE_DIR, file_name)
         
-        if not os.path.exists(file_path):
-            # Create a unique temporary folder just for this one download
-            temp_dir = os.path.join(CACHE_DIR, f"temp_{track_id}")
-            os.makedirs(temp_dir, exist_ok=True)
-            
-            try:
-                # Run spotDL command and capture stderr/stdout to debug exact syntax errors
-                result = subprocess.run([
-                    "spotdl", 
-                    "download", 
-                    clean_url
-                ], cwd=temp_dir, capture_output=True, text=True)
-
-                # If spotDL fails, throw an error showing EXACTLY what spotDL said
-                if result.returncode != 0:
-                    error_msg = result.stderr if result.stderr else result.stdout
-                    raise Exception(f"spotDL Error (Code {result.returncode}): {error_msg}")
-                
-                # Look inside the temp folder for the MP3 spotDL just created
-                downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
-                
-                if not downloaded_files:
-                    raise Exception("spotDL finished, but no MP3 file was found in folder.")
-                
-                temp_file_path = os.path.join(temp_dir, downloaded_files[0])
-                
-                # Move the file to our main cache and rename it to our strict track-id
-                shutil.move(temp_file_path, file_path)
-                
-            finally:
-                # Always delete the temporary folder when done
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
+        # Check if file is already cached and ready
+        if os.path.exists(file_path):
+            return {
+                "status": "ready",
+                "audio_url": f"https://mymusicappbackend.onrender.com/audio/{file_name}"
+            }
         
+        temp_dir = os.path.join(CACHE_DIR, f"temp_{track_id}")
+        
+        # If download isn't already running, kick it off in the background
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir, exist_ok=True)
+            background_tasks.add_task(run_spotdl_background, clean_url, temp_dir, file_path)
+        
+        # Respond immediately so Thunkable doesn't time out!
         return {
-            "status": "ready",
-            "audio_url": f"https://mymusicappbackend.onrender.com/audio/{file_name}"
+            "status": "processing",
+            "message": "Song is downloading. Try again in 15 seconds."
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
