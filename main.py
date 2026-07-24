@@ -4,12 +4,12 @@ import time
 import shutil
 import re
 import subprocess
+import base64
 import requests
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from mutagen.id3 import ID3, APIC, ID3NoHeaderError, TIT2, TPE1
-import base64
 
 # Force Python unbuffered logging so prints stream live to Northflank logs
 os.environ["PYTHONUNBUFFERED"] = "1"
@@ -81,7 +81,7 @@ def get_itunes_info(search_query: str):
 def download_with_ytdlp(search_query: str, temp_dir: str):
     """
     Downloads high-res audio via yt-dlp.
-    Cycles player clients (web, tv_embedded, android_music) to bypass JS decipher errors.
+    Uses Base64 cookies + web client, with SoundCloud fallback.
     """
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     cookie_path = os.path.join(temp_dir, "youtube_cookies.txt")
@@ -100,29 +100,31 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
         except Exception as cookie_err:
             print(f"Base64 cookie decoding error: {cookie_err}", flush=True)
 
-    # Client strategies to cycle through
-    client_strategies = [
-        "youtube:player_client=web",
-        "youtube:player_client=tv_embedded",
-        "youtube:player_client=android_music,mweb"
+    # Strategy 1: YouTube with Cookies & Web client
+    # Strategy 2: SoundCloud search (unblocked fallback)
+    search_targets = [
+        ("youtube", f"ytsearch1:{search_query}"),
+        ("soundcloud", f"scsearch1:{search_query}")
     ]
 
-    for idx, strategy in enumerate(client_strategies, 1):
-        print(f"--- [YT-DLP] Trying strategy {idx}: {strategy} ---", flush=True)
+    for source_name, target_url in search_targets:
+        print(f"--- [YT-DLP] Trying engine source: {source_name} ---", flush=True)
         
         ytdlp_cmd = [
             sys.executable, "-m", "yt_dlp",
-            f"ytsearch1:{search_query}",
+            target_url,
             "-x",
             "--audio-format", "mp3",
             "--audio-quality", "0",
             "-o", output_template,
-            "--no-playlist",
-            "--extractor-args", strategy
+            "--no-playlist"
         ]
 
-        if has_cookies and "web" in strategy:
-            ytdlp_cmd.extend(["--cookies", cookie_path])
+        if source_name == "youtube":
+            if has_cookies:
+                ytdlp_cmd.extend(["--cookies", cookie_path, "--extractor-args", "youtube:player_client=web,mweb"])
+            else:
+                ytdlp_cmd.extend(["--extractor-args", "youtube:player_client=mweb,android"])
 
         print(f"Executing command: {' '.join(ytdlp_cmd)}", flush=True)
         res = subprocess.run(ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
@@ -134,10 +136,11 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
 
         mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if res.returncode == 0 and mp3_files:
-            print(f"yt-dlp successfully downloaded audio stream using strategy {idx}!", flush=True)
+            print(f"yt-dlp successfully downloaded audio stream using {source_name}!", flush=True)
             return True
 
     return False
+
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
     """Background task to run download, apply metadata, and save to cache."""
     failed_marker = os.path.join(CACHE_DIR, f"{file_id}.failed")
@@ -159,7 +162,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             print("Saved 1000x1000 iTunes cover art to cache!", flush=True)
 
         # 2. Build search query
-        yt_search_term = f"{artist_name} {song_title} audio" if artist_name != "Unknown Artist" else search_query
+        yt_search_term = f"{artist_name} {song_title}" if artist_name != "Unknown Artist" else search_query
 
         # 3. Run download engine
         download_success = download_with_ytdlp(yt_search_term, temp_dir)
