@@ -4,6 +4,7 @@ import time
 import shutil
 import re
 import subprocess
+import requests
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,27 +52,57 @@ def get_existing_cover(file_id: str):
             return f"{file_id}{ext}"
     return None
 
+def get_youtube_url_from_duckduckgo(search_query: str):
+    """
+    Searches DuckDuckGo HTML to get a direct YouTube video URL.
+    Bypasses YouTube's search API rate-limits/bot blocks on datacenter IPs.
+    """
+    print(f"--- [DDG SEARCH] Resolving direct YouTube URL for '{search_query}' ---", flush=True)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+    encoded_query = requests.utils.quote(f"site:youtube.com/watch {search_query}")
+    search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+    
+    try:
+        res = requests.get(search_url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            video_ids = re.findall(r'watch\?v=([a-zA-Z0-9_-]{11})', res.text)
+            if video_ids:
+                direct_url = f"https://www.youtube.com/watch?v={video_ids[0]}"
+                print(f"--- [DDG SUCCESS] Found direct URL: {direct_url} ---", flush=True)
+                return direct_url
+    except Exception as e:
+        print(f"DuckDuckGo search notice: {e}", flush=True)
+        
+    return None
+
 def download_with_ytdlp(search_query: str, temp_dir: str):
     """
-    Downloads high-res audio using yt-dlp with Mobile Web / Android client spoofing.
-    Fixes '0 items found' search bugs while keeping bot-check bypass active.
+    Downloads audio using yt-dlp by resolving direct YouTube URLs first
+    to completely avoid YouTube's blocked search API on datacenter IPs.
     """
-    print(f"--- [YT-DLP ENGINE] Searching YouTube for '{search_query}' ---", flush=True)
+    # 1. Resolve direct URL via DuckDuckGo search first
+    target_url = get_youtube_url_from_duckduckgo(search_query)
+    if not target_url:
+        target_url = f"ytsearch1:{search_query}"
+        print(f"--- [FALLBACK] Using native ytsearch1 for '{search_query}' ---", flush=True)
+
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     
     ytdlp_cmd = [
         sys.executable, "-m", "yt_dlp",
-        f"ytsearch1:{search_query}",
+        target_url,
         "-x",
         "--audio-format", "mp3",
-        "--audio-quality", "0",  # Highest VBR MP3 quality (~250-320 kbps)
+        "--audio-quality", "0",
         "-o", output_template,
         "--no-playlist",
-        "--extractor-args", "youtube:player_client=mweb,android"
+        "--extractor-args", "youtube:player_client=android,mweb"
     ]
     
-    print(f"Executing: {' '.join(ytdlp_cmd)}", flush=True)
-    res = subprocess.run(ytdlp_cmd, stdout=None, stderr=None, timeout=45)
+    print(f"Executing yt-dlp: {' '.join(ytdlp_cmd)}", flush=True)
+    res = subprocess.run(ytdlp_cmd, stdout=None, stderr=None, timeout=60)
     
     mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
     if res.returncode == 0 and mp3_files:
@@ -89,7 +120,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         if os.path.exists(failed_marker):
             os.remove(failed_marker)
 
-        # 1. Clear out stale spotDL cache directory
+        # Clear out stale spotDL cache directory
         spotdl_cache_folder = os.path.expanduser("~/.spotdl")
         if os.path.exists(spotdl_cache_folder):
             try:
@@ -97,7 +128,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception:
                 pass
 
-        # 2. Execute yt-dlp with mobile web search spoofing
+        # Execute yt-dlp with direct URL resolution
         download_success = download_with_ytdlp(search_query, temp_dir)
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
@@ -110,7 +141,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
         print(f"Downloaded MP3 ready: {downloaded_files[0]}", flush=True)
         
-        # 3. Extract metadata
+        # Extract metadata
         artist_name = "Unknown Artist"
         album_name = "Unknown Album"
         try:
@@ -121,7 +152,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         except (ID3NoHeaderError, Exception) as tag_err:
             print(f"Metadata tag notice: {tag_err}", flush=True)
 
-        # 4. Fetch 1000x1000 cover art using SACAD
+        # Fetch 1000x1000 cover art using SACAD
         cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
         
         search_parts = search_query.split(" ")
@@ -159,7 +190,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception as embed_err:
                 print(f"Embedded art fallback notice: {embed_err}", flush=True)
 
-        # 5. Move final MP3 to primary cache directory
+        # Move final MP3 to primary cache directory
         shutil.move(downloaded_mp3_path, audio_path)
         print(f"--- [SUCCESS] Song processing complete! Saved to {audio_path} ---", flush=True)
 
