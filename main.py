@@ -67,7 +67,6 @@ def get_youtube_url_from_duckduckgo(search_query: str):
     try:
         res = requests.get(search_url, headers=headers, timeout=10)
         if res.status_code == 200:
-            # Matches both watch?v= and watch%3Fv%3D
             video_ids = re.findall(r'(?:watch\?v=|watch%3Fv%3D)([a-zA-Z0-9_-]{11})', res.text)
             if video_ids:
                 direct_url = f"https://www.youtube.com/watch?v={video_ids[0]}"
@@ -79,7 +78,10 @@ def get_youtube_url_from_duckduckgo(search_query: str):
     return None
 
 def download_with_ytdlp(search_query: str, temp_dir: str):
-    """Downloads audio + metadata + thumbnail using yt-dlp with Safari web client spoofing."""
+    """
+    Downloads audio using the exact proven yt-dlp configuration.
+    Zero risky CLI flags added.
+    """
     target_url = get_youtube_url_from_duckduckgo(search_query)
     if not target_url:
         target_url = f"ytsearch1:{search_query}"
@@ -95,10 +97,7 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
         "--audio-quality", "0",
         "-o", output_template,
         "--no-playlist",
-        "--add-metadata",
-        "--write-thumbnail",
-        "--convert-thumbnails", "jpg",
-        "--extractor-args", "youtube:player_client=web_safari,mweb"
+        "--extractor-args", "youtube:player_client=android,mweb"
     ]
     
     print(f"Executing yt-dlp: {' '.join(ytdlp_cmd)}", flush=True)
@@ -110,14 +109,86 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
         return True
     return False
 
+def enrich_metadata_and_cover(search_query: str, downloaded_mp3_path: str, file_id: str):
+    """
+    Fetches clean Artist, Song Title, and 1000x1000 Album Cover via iTunes API
+    completely independently of yt-dlp.
+    """
+    artist_name = "Unknown Artist"
+    song_title = search_query.title()
+    cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
+
+    # 1. Fetch official track details & 1000x1000 artwork from iTunes API
+    try:
+        itunes_url = f"https://itunes.apple.com/search?term={requests.utils.quote(search_query)}&entity=song&limit=1"
+        res = requests.get(itunes_url, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("resultCount", 0) > 0:
+                track = data["results"][0]
+                artist_name = track.get("artistName", artist_name)
+                song_title = track.get("trackName", song_title)
+                
+                artwork_url = track.get("artworkUrl100", "").replace("100x100bb", "1000x1000bb")
+                if artwork_url:
+                    img_res = requests.get(artwork_url, timeout=10)
+                    if img_res.status_code == 200:
+                        with open(cover_output_path, "wb") as f:
+                            f.write(img_res.content)
+                        print("Successfully saved 1000x1000 artwork from iTunes!", flush=True)
+    except Exception as e:
+        print(f"iTunes API notice: {e}", flush=True)
+
+    # 2. Fallback SACAD search if iTunes missed artwork
+    if not os.path.exists(cover_output_path):
+        try:
+            sacad_cmd = [
+                sys.executable, "-m", "sacad", 
+                artist_name, 
+                song_title, 
+                "1000", 
+                cover_output_path
+            ]
+            print(f"Running SACAD artwork search for '{artist_name}' - '{song_title}'...", flush=True)
+            sacad_res = subprocess.run(sacad_cmd, stdout=None, stderr=None, timeout=15)
+            if sacad_res.returncode == 0 and os.path.exists(cover_output_path):
+                print("SACAD successfully downloaded cover art!", flush=True)
+        except Exception as sacad_err:
+            print(f"SACAD notice: {sacad_err}", flush=True)
+
+    # 3. Fallback title/artist parsing if iTunes missed
+    if artist_name == "Unknown Artist":
+        if " - " in search_query:
+            parts = search_query.split(" - ", 1)
+            artist_name = parts[0].strip().title()
+            song_title = parts[1].strip().title()
+        elif len(search_query.split()) >= 2:
+            words = search_query.title().split()
+            artist_name = words[-1]
+            song_title = " ".join(words[:-1])
+
+    # 4. Write clean ID3 tags directly into the MP3 file
+    try:
+        try:
+            tags = ID3(downloaded_mp3_path)
+        except ID3NoHeaderError:
+            tags = ID3()
+        tags.add(TIT2(encoding=3, text=song_title))
+        tags.add(TPE1(encoding=3, text=artist_name))
+        tags.save(downloaded_mp3_path)
+    except Exception as e:
+        print(f"ID3 write notice: {e}", flush=True)
+
+    print(f"Final Metadata -> Song: '{song_title}', Artist: '{artist_name}'", flush=True)
+    return song_title, artist_name
+
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
-    """Downloads audio, extracts/formats metadata, and manages cover art."""
+    """Background task to run download, apply metadata, and save to cache."""
     failed_marker = os.path.join(CACHE_DIR, f"{file_id}.failed")
     
     try:
         print(f"--- [START] Processing query: '{search_query}' ---", flush=True)
         
-        # Always remove stale failed marker before starting
         if os.path.exists(failed_marker):
             os.remove(failed_marker)
 
@@ -128,6 +199,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception:
                 pass
 
+        # Execute the working yt-dlp downloader
         download_success = download_with_ytdlp(search_query, temp_dir)
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
@@ -139,88 +211,11 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
 
         downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
         print(f"Downloaded MP3 ready: {downloaded_files[0]}", flush=True)
-        
-        # --- METADATA FORMATTING ---
-        artist_name = "Unknown Artist"
-        song_title = search_query.title()
 
-        try:
-            tags = ID3(downloaded_mp3_path)
-            extracted_artist = str(tags.get("TPE1", "")).strip()
-            extracted_title = str(tags.get("TIT2", "")).strip()
-            
-            if extracted_artist and extracted_artist != "Unknown Artist":
-                artist_name = extracted_artist
-            if extracted_title and extracted_title != "Unknown Title":
-                song_title = extracted_title
-        except (ID3NoHeaderError, Exception) as tag_err:
-            print(f"Metadata tag notice: {tag_err}", flush=True)
+        # Enrich Metadata & Cover Art via Python
+        enrich_metadata_and_cover(search_query, downloaded_mp3_path, file_id)
 
-        # Fallback parsing if metadata tags are generic
-        if artist_name == "Unknown Artist" and " - " in song_title:
-            parts = song_title.split(" - ", 1)
-            artist_name = parts[0].strip()
-            song_title = parts[1].strip()
-        elif artist_name == "Unknown Artist" and len(search_query.split()) >= 2:
-            words = search_query.title().split()
-            artist_name = words[-1]
-            song_title = " ".join(words[:-1])
-
-        print(f"Final Metadata -> Song: '{song_title}', Artist: '{artist_name}'", flush=True)
-
-        # Write clean metadata back to MP3 ID3 tags
-        try:
-            try:
-                tags = ID3(downloaded_mp3_path)
-            except ID3NoHeaderError:
-                tags = ID3()
-            tags.add(TIT2(encoding=3, text=song_title))
-            tags.add(TPE1(encoding=3, text=artist_name))
-            tags.save(downloaded_mp3_path)
-        except Exception as e:
-            print(f"ID3 rewrite notice: {e}", flush=True)
-
-        # --- COVER ART HANDLING ---
-        cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
-        
-        # 1. Try SACAD for 1000x1000 cover art
-        try:
-            sacad_cmd = [
-                sys.executable, "-m", "sacad", 
-                artist_name, 
-                song_title, 
-                "1000", 
-                cover_output_path
-            ]
-            print(f"Running SACAD artwork search for '{artist_name}' - '{song_title}'...", flush=True)
-            sacad_res = subprocess.run(sacad_cmd, stdout=None, stderr=None, timeout=20)
-            if sacad_res.returncode == 0 and os.path.exists(cover_output_path):
-                print("SACAD successfully downloaded 1000x1000 cover art!", flush=True)
-        except Exception as sacad_err:
-            print(f"SACAD notice: {sacad_err}", flush=True)
-
-        # 2. Fallback: Copy YouTube thumbnail
-        if not os.path.exists(cover_output_path):
-            jpg_files = [f for f in os.listdir(temp_dir) if f.endswith(".jpg") or f.endswith(".webp")]
-            if jpg_files:
-                thumb_path = os.path.join(temp_dir, jpg_files[0])
-                shutil.copy(thumb_path, cover_output_path)
-                print("Fallback: Using YouTube video thumbnail for cover art!", flush=True)
-
-        # 3. Fallback: Extract embedded cover art from MP3
-        if not os.path.exists(cover_output_path):
-            try:
-                tags = ID3(downloaded_mp3_path)
-                for tag in tags.values():
-                    if isinstance(tag, APIC):
-                        with open(cover_output_path, 'wb') as img_file:
-                            img_file.write(tag.data)
-                        print("Fallback: Extracted embedded cover art from MP3!", flush=True)
-                        break
-            except Exception as embed_err:
-                print(f"Embedded art fallback notice: {embed_err}", flush=True)
-
-        # Move final MP3 to primary cache directory
+        # Move final file to primary cache
         shutil.move(downloaded_mp3_path, audio_path)
         print(f"--- [SUCCESS] Song processing complete! Saved to {audio_path} ---", flush=True)
 
@@ -236,7 +231,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
 
 # --- ENDPOINTS ---
 @app.get("/download-song")
-def download_song(song: str, background_tasks: BackgroundTasks, request: Request, retry: bool = False):
+def download_song(song: str, background_tasks: BackgroundTasks, request: Request):
     background_tasks.add_task(cleanup_old_files)
     
     try:
@@ -255,10 +250,6 @@ def download_song(song: str, background_tasks: BackgroundTasks, request: Request
         audio_path = os.path.join(CACHE_DIR, audio_file_name)
         failed_marker = os.path.join(CACHE_DIR, f"{file_id}.failed")
         
-        # Force clear failed marker on new attempts
-        if retry and os.path.exists(failed_marker):
-            os.remove(failed_marker)
-            
         base_url = str(request.base_url).rstrip("/")
         
         # 1. Return cached audio if available
@@ -283,9 +274,9 @@ def download_song(song: str, background_tasks: BackgroundTasks, request: Request
                 "artist": artist_name
             }
         
-        # 2. If marked failed previously and retry is False, instruct client
-        if os.path.exists(failed_marker) and not retry:
-            os.remove(failed_marker)  # Auto-clear on new requests
+        # 2. Always wipe stale failed markers on new incoming requests
+        if os.path.exists(failed_marker):
+            os.remove(failed_marker)
 
         # 3. Queue download task
         temp_dir = os.path.join(CACHE_DIR, f"temp_{file_id}")
