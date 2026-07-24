@@ -77,60 +77,105 @@ def get_itunes_info(search_query: str):
 
     return song_title, artist_name, cover_bytes
 
-def download_via_piped_proxy(search_query: str, output_mp3_path: str):
+def download_via_proxy_api(search_query: str, output_mp3_path: str):
     """
-    Fetches direct YouTube audio stream URLs via public Piped API instances.
-    Bypasses BotGuard, cookies, and local IP blocks completely.
+    Cycles through active Piped and Invidious instances to fetch YouTube audio streams directly.
     """
-    print(f"--- [PROXY ENGINE] Searching Piped instances for '{search_query}' ---", flush=True)
+    print(f"--- [PROXY ENGINE] Searching active instances for '{search_query}' ---", flush=True)
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
 
-    piped_instances = [
-        "https://api.piped.private.coffee",
-        "https://pipedapi.p34.eu",
-        "https://pipedapi.drgns.space",
-        "https://pipedapi.mha.fi"
+    # Active, high-uptime public API instances
+    proxy_instances = [
+        # Piped API endpoints
+        ("piped", "https://pipedapi.adminforge.de"),
+        ("piped", "https://pipedapi.kavin.rocks"),
+        ("piped", "https://pipedapi.aston.cx"),
+        ("piped", "https://pipedapi.projectsegfau.lt"),
+        ("piped", "https://api.piped.private.coffee"),
+        
+        # Invidious API endpoints
+        ("invidious", "https://invidious.nerdvpn.de"),
+        ("invidious", "https://inv.tux.pizza"),
+        ("invidious", "https://invidious.projectsegfau.lt"),
+        ("invidious", "https://invidious.drgns.space")
     ]
 
-    for api_base in piped_instances:
+    for api_type, api_base in proxy_instances:
         try:
-            print(f"Querying Piped instance: {api_base}...", flush=True)
-            search_url = f"{api_base}/search?q={requests.utils.quote(search_query)}&filter=music_songs"
-            res = requests.get(search_url, headers=headers, timeout=6)
-            
-            if res.status_code != 200:
+            print(f"Testing {api_type} instance: {api_base}...", flush=True)
+            direct_stream_url = None
+
+            if api_type == "piped":
+                search_url = f"{api_base}/search?q={requests.utils.quote(search_query)}&filter=music_songs"
+                res = requests.get(search_url, headers=headers, timeout=6)
+                
+                if res.status_code != 200:
+                    print(f"[{api_base}] Search HTTP status: {res.status_code}", flush=True)
+                    continue
+
+                items = res.json().get("items", [])
+                if not items:
+                    res = requests.get(f"{api_base}/search?q={requests.utils.quote(search_query)}&filter=all", headers=headers, timeout=6)
+                    items = res.json().get("items", []) if res.status_code == 200 else []
+
+                if not items:
+                    continue
+
+                video_id = items[0]["url"].replace("/watch?v=", "")
+                print(f"Found Video ID '{video_id}' on {api_base}", flush=True)
+
+                stream_res = requests.get(f"{api_base}/streams/{video_id}", headers=headers, timeout=8)
+                if stream_res.status_code != 200:
+                    print(f"[{api_base}] Stream endpoint returned HTTP {stream_res.status_code}", flush=True)
+                    continue
+
+                audio_streams = stream_res.json().get("audioStreams", [])
+                if not audio_streams:
+                    continue
+
+                audio_streams.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
+                direct_stream_url = audio_streams[0]["url"]
+
+            elif api_type == "invidious":
+                search_url = f"{api_base}/api/v1/search?q={requests.utils.quote(search_query)}&type=video"
+                res = requests.get(search_url, headers=headers, timeout=6)
+                
+                if res.status_code != 200:
+                    print(f"[{api_base}] Search HTTP status: {res.status_code}", flush=True)
+                    continue
+
+                items = res.json()
+                if not isinstance(items, list) or not items:
+                    continue
+
+                video_id = items[0].get("videoId")
+                if not video_id:
+                    continue
+
+                print(f"Found Video ID '{video_id}' on {api_base}", flush=True)
+
+                stream_res = requests.get(f"{api_base}/api/v1/videos/{video_id}", headers=headers, timeout=8)
+                if stream_res.status_code != 200:
+                    print(f"[{api_base}] Video endpoint returned HTTP {stream_res.status_code}", flush=True)
+                    continue
+
+                adaptive_formats = stream_res.json().get("adaptiveFormats", [])
+                audio_streams = [f for f in adaptive_formats if f.get("type", "").startswith("audio/")]
+                if not audio_streams:
+                    continue
+
+                audio_streams.sort(key=lambda x: int(x.get("bitrate", 0)), reverse=True)
+                direct_stream_url = audio_streams[0]["url"]
+
+            if not direct_stream_url:
                 continue
-            
-            items = res.json().get("items", [])
-            if not items:
-                # Try unfiltered search if music search yields nothing
-                res = requests.get(f"{api_base}/search?q={requests.utils.quote(search_query)}&filter=all", headers=headers, timeout=6)
-                items = res.json().get("items", []) if res.status_code == 200 else []
 
-            if not items:
-                continue
+            print(f"Downloading stream directly to MP3 from {api_base}...", flush=True)
 
-            video_id = items[0]["url"].replace("/watch?v=", "")
-            print(f"Found Video ID '{video_id}' on {api_base}", flush=True)
-
-            stream_res = requests.get(f"{api_base}/streams/{video_id}", headers=headers, timeout=8)
-            if stream_res.status_code != 200:
-                continue
-
-            audio_streams = stream_res.json().get("audioStreams", [])
-            if not audio_streams:
-                continue
-
-            # Sort by highest bitrate stream
-            audio_streams.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
-            direct_stream_url = audio_streams[0]["url"]
-
-            print(f"Downloading stream directly to MP3...", flush=True)
-            
-            # Use ffmpeg if available to convert stream directly to high-quality MP3
+            # 1. Primary method: Convert stream to clean MP3 using ffmpeg
             ffmpeg_cmd = [
                 "ffmpeg", "-y",
                 "-headers", "User-Agent: Mozilla/5.0\r\n",
@@ -138,26 +183,26 @@ def download_via_piped_proxy(search_query: str, output_mp3_path: str):
                 "-vn", "-ar", "44100", "-ac", "2", "-b:a", "192k",
                 output_mp3_path
             ]
-            
+
             ffmpeg_res = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45)
-            
+
             if ffmpeg_res.returncode == 0 and os.path.exists(output_mp3_path) and os.path.getsize(output_mp3_path) > 100000:
-                print(f"--- [SUCCESS] Piped Proxy Engine downloaded MP3 successfully! ---", flush=True)
+                print(f"--- [SUCCESS] Downloaded audio file via {api_base}! ---", flush=True)
                 return True
 
-            # Fallback: Raw stream write if ffmpeg conversion had an issue
+            # 2. Fallback method: Direct HTTP stream write
             with requests.get(direct_stream_url, headers=headers, stream=True, timeout=30) as stream_response:
                 if stream_response.status_code == 200:
                     with open(output_mp3_path, "wb") as f:
                         for chunk in stream_response.iter_content(chunk_size=8192):
                             f.write(chunk)
-                    
+
                     if os.path.exists(output_mp3_path) and os.path.getsize(output_mp3_path) > 100000:
-                        print("--- [SUCCESS] Stream saved directly to file! ---", flush=True)
+                        print(f"--- [SUCCESS] Stream saved directly via {api_base}! ---", flush=True)
                         return True
 
         except Exception as e:
-            print(f"Piped instance error on {api_base}: {e}", flush=True)
+            print(f"Proxy engine error on {api_base}: {e}", flush=True)
             continue
 
     return False
@@ -185,12 +230,12 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         # 2. Build search query
         clean_search_term = f"{artist_name} {song_title}" if artist_name != "Unknown Artist" else search_query
 
-        # 3. Download via Piped Proxy Engine (No cookies or BotGuard required)
+        # 3. Download via Proxy Engine
         temp_mp3 = os.path.join(temp_dir, "downloaded_track.mp3")
-        download_success = download_via_piped_proxy(clean_search_term, temp_mp3)
+        download_success = download_via_proxy_api(clean_search_term, temp_mp3)
 
         if not download_success or not os.path.exists(temp_mp3):
-            print("--- [ERROR] All download engines failed ---", flush=True)
+            print("--- [ERROR] All proxy instances failed ---", flush=True)
             with open(failed_marker, "w") as f:
                 f.write("Download failed")
             return
