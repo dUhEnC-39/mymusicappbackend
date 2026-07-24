@@ -8,7 +8,7 @@ import requests
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from mutagen.id3 import ID3, APIC, ID3NoHeaderError
+from mutagen.id3 import ID3, APIC, ID3NoHeaderError, TIT2, TPE1
 
 # Force Python unbuffered logging so prints stream live to Northflank logs
 os.environ["PYTHONUNBUFFERED"] = "1"
@@ -53,10 +53,7 @@ def get_existing_cover(file_id: str):
     return None
 
 def get_youtube_url_from_duckduckgo(search_query: str):
-    """
-    Searches DuckDuckGo HTML to get a direct YouTube video URL.
-    Bypasses YouTube's search API rate-limits/bot blocks on datacenter IPs.
-    """
+    """Searches DuckDuckGo HTML to resolve direct YouTube URLs."""
     print(f"--- [DDG SEARCH] Resolving direct YouTube URL for '{search_query}' ---", flush=True)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -78,11 +75,7 @@ def get_youtube_url_from_duckduckgo(search_query: str):
     return None
 
 def download_with_ytdlp(search_query: str, temp_dir: str):
-    """
-    Downloads audio using yt-dlp by resolving direct YouTube URLs first
-    to completely avoid YouTube's blocked search API on datacenter IPs.
-    """
-    # 1. Resolve direct URL via DuckDuckGo search first
+    """Downloads audio + metadata + thumbnail using yt-dlp."""
     target_url = get_youtube_url_from_duckduckgo(search_query)
     if not target_url:
         target_url = f"ytsearch1:{search_query}"
@@ -98,6 +91,9 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
         "--audio-quality", "0",
         "-o", output_template,
         "--no-playlist",
+        "--add-metadata",
+        "--write-thumbnail",
+        "--convert-thumbnails", "jpg",
         "--extractor-args", "youtube:player_client=android,mweb"
     ]
     
@@ -111,7 +107,7 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
     return False
 
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
-    """Downloads audio, extracts metadata, and fetches 1000x1000 cover art."""
+    """Downloads audio, extracts/formats metadata, and manages cover art."""
     failed_marker = os.path.join(CACHE_DIR, f"{file_id}.failed")
     
     try:
@@ -120,7 +116,6 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         if os.path.exists(failed_marker):
             os.remove(failed_marker)
 
-        # Clear out stale spotDL cache directory
         spotdl_cache_folder = os.path.expanduser("~/.spotdl")
         if os.path.exists(spotdl_cache_folder):
             try:
@@ -128,12 +123,11 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception:
                 pass
 
-        # Execute yt-dlp with direct URL resolution
         download_success = download_with_ytdlp(search_query, temp_dir)
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if not download_success or not downloaded_files:
-            print("--- [ERROR] All download engines failed to produce an MP3 ---", flush=True)
+            print("--- [ERROR] Download engine failed to produce an MP3 ---", flush=True)
             with open(failed_marker, "w") as f:
                 f.write("Download engines failed")
             return
@@ -141,43 +135,75 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
         print(f"Downloaded MP3 ready: {downloaded_files[0]}", flush=True)
         
-        # Extract metadata
+        # --- METADATA FORMATTING ---
         artist_name = "Unknown Artist"
-        album_name = "Unknown Album"
+        song_title = search_query.title()
+
         try:
             tags = ID3(downloaded_mp3_path)
-            artist_name = str(tags.get("TPE1", "Unknown Artist"))
-            album_name = str(tags.get("TALB", "Unknown Album"))
-            print(f"Extracted Metadata -> Artist: '{artist_name}', Album: '{album_name}'", flush=True)
+            extracted_artist = str(tags.get("TPE1", "")).strip()
+            extracted_title = str(tags.get("TIT2", "")).strip()
+            
+            if extracted_artist and extracted_artist != "Unknown Artist":
+                artist_name = extracted_artist
+            if extracted_title and extracted_title != "Unknown Title":
+                song_title = extracted_title
         except (ID3NoHeaderError, Exception) as tag_err:
             print(f"Metadata tag notice: {tag_err}", flush=True)
 
-        # Fetch 1000x1000 cover art using SACAD
+        # Smart fallback parsing if metadata tags are still generic
+        if artist_name == "Unknown Artist" and " - " in song_title:
+            parts = song_title.split(" - ", 1)
+            artist_name = parts[0].strip()
+            song_title = parts[1].strip()
+        elif artist_name == "Unknown Artist" and len(search_query.split()) >= 2:
+            # Fallback for search queries like "Fighting the world manowar"
+            words = search_query.title().split()
+            artist_name = words[-1]
+            song_title = " ".join(words[:-1])
+
+        print(f"Final Metadata -> Song: '{song_title}', Artist: '{artist_name}'", flush=True)
+
+        # Write clean metadata back to MP3 ID3 tags
+        try:
+            try:
+                tags = ID3(downloaded_mp3_path)
+            except ID3NoHeaderError:
+                tags = ID3()
+            tags.add(TIT2(encoding=3, text=song_title))
+            tags.add(TPE1(encoding=3, text=artist_name))
+            tags.save(downloaded_mp3_path)
+        except Exception as e:
+            print(f"ID3 rewrite notice: {e}", flush=True)
+
+        # --- COVER ART HANDLING ---
         cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
         
-        search_parts = search_query.split(" ")
-        query_artist = search_parts[-1] if len(search_parts) > 1 else search_query
-        query_album = search_query
-
-        sacad_artist = artist_name if artist_name != "Unknown Artist" else query_artist
-        sacad_album = album_name if album_name != "Unknown Album" else query_album
-
+        # 1. Try SACAD for 1000x1000 high-res cover art
         try:
             sacad_cmd = [
                 sys.executable, "-m", "sacad", 
-                sacad_artist, 
-                sacad_album, 
+                artist_name, 
+                song_title, 
                 "1000", 
                 cover_output_path
             ]
-            print(f"Running SACAD artwork search for '{sacad_artist}' - '{sacad_album}'...", flush=True)
-            sacad_res = subprocess.run(sacad_cmd, stdout=None, stderr=None, timeout=25)
+            print(f"Running SACAD artwork search for '{artist_name}' - '{song_title}'...", flush=True)
+            sacad_res = subprocess.run(sacad_cmd, stdout=None, stderr=None, timeout=20)
             if sacad_res.returncode == 0 and os.path.exists(cover_output_path):
                 print("SACAD successfully downloaded 1000x1000 cover art!", flush=True)
         except Exception as sacad_err:
             print(f"SACAD notice: {sacad_err}", flush=True)
 
-        # Fallback: Extract embedded cover art from MP3 if SACAD missed
+        # 2. Fallback: Copy YouTube thumbnail downloaded by yt-dlp
+        if not os.path.exists(cover_output_path):
+            jpg_files = [f for f in os.listdir(temp_dir) if f.endswith(".jpg") or f.endswith(".webp")]
+            if jpg_files:
+                thumb_path = os.path.join(temp_dir, jpg_files[0])
+                shutil.copy(thumb_path, cover_output_path)
+                print("Fallback: Using YouTube video thumbnail for cover art!", flush=True)
+
+        # 3. Fallback: Extract embedded cover art from MP3
         if not os.path.exists(cover_output_path):
             try:
                 tags = ID3(downloaded_mp3_path)
@@ -232,11 +258,11 @@ def download_song(song: str, background_tasks: BackgroundTasks, request: Request
             existing_cover_name = get_existing_cover(file_id)
             cover_url = f"{base_url}/audio/{existing_cover_name}" if existing_cover_name else None
             
-            song_title = "Unknown Title"
+            song_title = query.title()
             artist_name = "Unknown Artist"
             try:
                 tags = ID3(audio_path)
-                song_title = str(tags.get("TIT2", query))
+                song_title = str(tags.get("TIT2", query.title()))
                 artist_name = str(tags.get("TPE1", "Unknown Artist"))
             except Exception:
                 pass
