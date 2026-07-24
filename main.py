@@ -81,7 +81,7 @@ def get_itunes_info(search_query: str):
 def download_with_ytdlp(search_query: str, temp_dir: str):
     """
     Downloads high-res audio via yt-dlp.
-    Prioritizes SoundCloud (fast, no cookies required), with YouTube as fallback.
+    Searches 5 items per source, filtering out DRM-protected preview clips automatically.
     """
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     cookie_path = os.path.join(temp_dir, "youtube_cookies.txt")
@@ -95,17 +95,18 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
             with open(cookie_path, "wb") as f:
                 f.write(decoded_bytes)
             has_cookies = True
-        except Exception:
-            pass
+            print(f"Loaded Base64 cookie file ({os.path.getsize(cookie_path)} bytes).", flush=True)
+        except Exception as cookie_err:
+            print(f"Cookie notice: {cookie_err}", flush=True)
 
-    # Try SoundCloud first (fastest on cloud servers), then YouTube
+    # Search depth of 5 results with DRM & duration filtering
     search_targets = [
-        ("soundcloud", f"scsearch1:{search_query}"),
-        ("youtube", f"ytsearch1:{search_query}")
+        ("soundcloud", f"scsearch5:{search_query}"),
+        ("youtube", f"ytsearch5:{search_query}")
     ]
 
     for source_name, target_url in search_targets:
-        print(f"--- [YT-DLP] Trying engine source: {source_name} ---", flush=True)
+        print(f"--- [YT-DLP] Attempting source: {source_name} ---", flush=True)
         
         ytdlp_cmd = [
             sys.executable, "-m", "yt_dlp",
@@ -114,7 +115,8 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
             "--audio-format", "mp3",
             "--audio-quality", "0",
             "-o", output_template,
-            "--no-playlist"
+            "--no-playlist",
+            "--match-filter", "!drm & duration > 60"
         ]
 
         if source_name == "youtube" and has_cookies:
@@ -130,7 +132,7 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
 
         mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if res.returncode == 0 and mp3_files:
-            print(f"Successfully downloaded audio stream using {source_name}!", flush=True)
+            print(f"Successfully downloaded audio track via {source_name}!", flush=True)
             return True
 
     return False
@@ -163,9 +165,9 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if not download_success or not downloaded_files:
-            print("--- [ERROR] Download engine failed ---", flush=True)
+            print("--- [ERROR] All download attempts failed ---", flush=True)
             with open(failed_marker, "w") as f:
-                f.write("Download engine failed")
+                f.write("Download failed")
             return
 
         downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
