@@ -1,5 +1,6 @@
 import os
 import time
+import shutil
 import subprocess
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
@@ -8,7 +9,7 @@ app = FastAPI()
 
 # Configuration
 CACHE_DIR = "music_cache"
-MAX_FILE_AGE_SECONDS = 3600  # 1 hour (60 minutes * 60 seconds)
+MAX_FILE_AGE_SECONDS = 3600  # 1 hour
 
 # Create cache directory and mount it so Thunkable can access the MP3s
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -27,45 +28,56 @@ def cleanup_old_files():
         if os.path.isfile(file_path):
             file_age = now - os.path.getmtime(file_path)
             
-            # If the file is older than our limit, delete it
             if file_age > MAX_FILE_AGE_SECONDS:
                 try:
                     os.remove(file_path)
                     print(f"Deleted old file: {filename}")
                 except Exception as e:
-                    # If the file is currently being read by someone, skip it for now
-                    print(f"Could not delete {filename}: {e}")
+                    pass
 
 @app.get("/download-song")
 def download_song(spotify_url: str, background_tasks: BackgroundTasks):
     """
     Takes a Spotify URL, downloads the MP3, and returns a playable link.
-    Also triggers a background cleanup of old files.
     """
     background_tasks.add_task(cleanup_old_files)
     
     try:
-        # 1. Clean the URL
         clean_url = spotify_url.split("?")[0]
-        
-        # 2. Extract the unique track ID 
         track_id = clean_url.split("/")[-1]
         
         file_name = f"{track_id}.mp3"
         file_path = os.path.join(CACHE_DIR, file_name)
         
-        # 3. Only run the download if it's not already in the cache
         if not os.path.exists(file_path):
-            # Give spotDL exactly what it wants: the {track-id} variable!
-            subprocess.run([
-                "spotdl", 
-                "download", 
-                clean_url, 
-                "--format", "mp3", 
-                "--output", f"{CACHE_DIR}/{{track-id}}.mp3"
-            ], check=True)
+            # Create a unique temporary folder just for this one download
+            temp_dir = os.path.join(CACHE_DIR, f"temp_{track_id}")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            try:
+                # Run spotDL inside the temp folder! No output flags needed.
+                subprocess.run([
+                    "spotdl", 
+                    clean_url, 
+                    "--format", "mp3"
+                ], cwd=temp_dir, check=True)
+                
+                # Look inside the temp folder for the MP3 spotDL just created
+                downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
+                
+                if not downloaded_files:
+                    raise Exception("spotDL finished, but no MP3 file was found.")
+                
+                temp_file_path = os.path.join(temp_dir, downloaded_files[0])
+                
+                # Move the file to our main cache and rename it to our strict track-id
+                shutil.move(temp_file_path, file_path)
+                
+            finally:
+                # Always delete the temporary folder when we are done, even if it crashed
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
         
-        # Return the public URL
         return {
             "status": "ready",
             "audio_url": f"https://mymusicappbackend.onrender.com/audio/{file_name}"
