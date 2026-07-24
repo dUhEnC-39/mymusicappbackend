@@ -64,7 +64,6 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         # 1. spotDL execution command with correct output format and YT Music provider
         download_cmd = [
             sys.executable, "-m", "spotdl", 
-            "download", 
             search_query,
             "--output-format", "mp3"
         ]
