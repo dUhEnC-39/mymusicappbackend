@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from mutagen.id3 import ID3, APIC, ID3NoHeaderError
 
-# Force Python unbuffered logging so prints show up live in Northflank
+# Force Python unbuffered logging so prints stream live to Northflank logs
 os.environ["PYTHONUNBUFFERED"] = "1"
 
 # --- FASTAPI SETUP ---
@@ -24,7 +24,7 @@ app.add_middleware(
 )
 
 CACHE_DIR = "music_cache"
-MAX_FILE_AGE_SECONDS = 3600  # 1 hour auto-cleanup
+MAX_FILE_AGE_SECONDS = 3600  # Auto-cleanup files older than 1 hour
 
 os.makedirs(CACHE_DIR, exist_ok=True)
 app.mount("/audio", StaticFiles(directory=CACHE_DIR), name="audio")
@@ -32,7 +32,7 @@ app.mount("/audio", StaticFiles(directory=CACHE_DIR), name="audio")
 
 # --- HELPER FUNCTIONS ---
 def cleanup_old_files():
-    """Deletes cached MP3s, cover images, and error markers older than 1 hour."""
+    """Deletes cached MP3s, cover images, and failure markers older than 1 hour."""
     now = time.time()
     for filename in os.listdir(CACHE_DIR):
         file_path = os.path.join(CACHE_DIR, filename)
@@ -44,7 +44,7 @@ def cleanup_old_files():
                     pass
 
 def get_existing_cover(file_id: str):
-    """Checks if an image file exists for this track in the cache."""
+    """Checks if a cover image exists for this track in the cache."""
     for ext in [".jpg", ".png", ".webp", ".jpeg"]:
         cover_path = os.path.join(CACHE_DIR, f"{file_id}{ext}")
         if os.path.exists(cover_path):
@@ -52,25 +52,43 @@ def get_existing_cover(file_id: str):
     return None
 
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
-    """Downloads audio with live streaming logs, cloud-block bypasses, and failure tracking."""
+    """Downloads audio, extracts metadata, and fetches cover art with full error trapping."""
     failed_marker = os.path.join(CACHE_DIR, f"{file_id}.failed")
     
     try:
         print(f"--- [START] Processing query: '{search_query}' ---", flush=True)
         
+        # Clear old failure marker if retrying
         if os.path.exists(failed_marker):
             os.remove(failed_marker)
 
-        # 1. spotDL execution command with correct output format and YT Music provider
+        # 1. Clear out stale spotDL cache folder to prevent rate-limit loops
+        spotdl_cache_folder = os.path.expanduser("~/.spotdl")
+        if os.path.exists(spotdl_cache_folder):
+            try:
+                shutil.rmtree(spotdl_cache_folder, ignore_errors=True)
+                print("Cleared stale spotDL cache directory.", flush=True)
+            except Exception as cache_err:
+                print(f"Cache clear notice: {cache_err}", flush=True)
+
+        # 2. Build spotDL command using Northflank Spotify credentials
+        client_id = os.getenv("SPOTIPY_CLIENT_ID")
+        client_secret = os.getenv("SPOTIPY_CLIENT_SECRET")
+
         download_cmd = [
             sys.executable, "-m", "spotdl", 
             search_query,
-            "--output-format", "mp3"
+            "--output-format", "mp3",
+            "--no-cache"
         ]
-        
+
+        if client_id and client_secret:
+            download_cmd.extend(["--client-id", client_id.strip(), "--client-secret", client_secret.strip()])
+            print("Using custom Spotify Developer credentials.", flush=True)
+
         print(f"Executing: {' '.join(download_cmd)}", flush=True)
         
-        # Pass stdout/stderr directly to console for live streaming in Northflank
+        # Stream output directly to console for live Northflank visibility
         result = subprocess.run(
             download_cmd, 
             cwd=temp_dir, 
@@ -80,14 +98,14 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         )
         
         if result.returncode != 0:
-            print(f"--- [ERROR] spotDL returned code {result.returncode} ---", flush=True)
+            print(f"--- [ERROR] spotDL returned exit code {result.returncode} ---", flush=True)
             with open(failed_marker, "w") as f:
                 f.write(f"spotdl failed with code {result.returncode}")
             return
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if not downloaded_files:
-            print("--- [ERROR] No MP3 produced in temp folder ---", flush=True)
+            print("--- [ERROR] No MP3 produced in temp directory ---", flush=True)
             with open(failed_marker, "w") as f:
                 f.write("No MP3 file produced")
             return
@@ -95,18 +113,18 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
         print(f"Downloaded MP3 found: {downloaded_files[0]}", flush=True)
         
-        # 2. Metadata extraction
+        # 3. Extract metadata
         artist_name = "Unknown Artist"
         album_name = "Unknown Album"
         try:
             tags = ID3(downloaded_mp3_path)
             artist_name = str(tags.get("TPE1", "Unknown Artist"))
             album_name = str(tags.get("TALB", "Unknown Album"))
-            print(f"Extracted Tags -> Artist: '{artist_name}', Album: '{album_name}'", flush=True)
+            print(f"Extracted Metadata -> Artist: '{artist_name}', Album: '{album_name}'", flush=True)
         except (ID3NoHeaderError, Exception) as tag_err:
             print(f"Could not read ID3 tags: {tag_err}", flush=True)
 
-        # 3. Fetch 1000x1000 cover art using SACAD
+        # 4. Fetch 1000x1000 cover art using SACAD
         cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
         if artist_name != "Unknown Artist" and album_name != "Unknown Album":
             try:
@@ -129,7 +147,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception as sacad_err:
                 print(f"SACAD error: {sacad_err}", flush=True)
 
-        # Fallback: Extract embedded cover art from MP3 if SACAD misses
+        # Fallback: Extract embedded cover art from MP3 if SACAD fails
         if not os.path.exists(cover_output_path):
             try:
                 tags = ID3(downloaded_mp3_path)
@@ -142,9 +160,9 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception as embed_err:
                 print(f"Embedded art fallback error: {embed_err}", flush=True)
 
-        # 4. Save final MP3 to cache
+        # 5. Move final MP3 to primary cache directory
         shutil.move(downloaded_mp3_path, audio_path)
-        print(f"--- [SUCCESS] Saved to {audio_path} ---", flush=True)
+        print(f"--- [SUCCESS] Song processing complete! Saved to {audio_path} ---", flush=True)
 
     except subprocess.TimeoutExpired:
         print("--- [TIMEOUT] spotDL timed out after 90s ---", flush=True)
@@ -184,7 +202,7 @@ def download_song(song: str, background_tasks: BackgroundTasks, request: Request
         
         base_url = str(request.base_url).rstrip("/")
         
-        # 1. If song is cached and ready
+        # 1. Return cached audio if available
         if os.path.exists(audio_path):
             existing_cover_name = get_existing_cover(file_id)
             cover_url = f"{base_url}/audio/{existing_cover_name}" if existing_cover_name else None
@@ -206,14 +224,14 @@ def download_song(song: str, background_tasks: BackgroundTasks, request: Request
                 "artist": artist_name
             }
         
-        # 2. If download previously failed
+        # 2. Return failed state if download previously errored
         if os.path.exists(failed_marker):
             return {
                 "status": "failed",
                 "message": "Download failed on server. Try a different search term."
             }
 
-        # 3. Kick off download in background
+        # 3. Queue download task
         temp_dir = os.path.join(CACHE_DIR, f"temp_{file_id}")
         if not os.path.exists(temp_dir):
             os.makedirs(temp_dir, exist_ok=True)
