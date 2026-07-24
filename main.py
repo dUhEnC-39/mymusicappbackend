@@ -66,8 +66,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             sys.executable, "-m", "spotdl", 
             "download", 
             search_query,
-            "--output-format", "mp3",
-            "--audio", "youtube-music"
+            "--output-format", "mp3"
         ]
         
         print(f"Executing: {' '.join(download_cmd)}", flush=True)
