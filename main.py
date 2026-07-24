@@ -55,18 +55,23 @@ def download_song(spotify_url: str, background_tasks: BackgroundTasks):
             os.makedirs(temp_dir, exist_ok=True)
             
             try:
-                # Run spotDL inside the temp folder! No output flags needed.
-                subprocess.run([
+                # Run spotDL command and capture stderr/stdout to debug exact syntax errors
+                result = subprocess.run([
                     "spotdl", 
-                    clean_url, 
-                    "--format", "mp3"
-                ], cwd=temp_dir, check=True)
+                    "download", 
+                    clean_url
+                ], cwd=temp_dir, capture_output=True, text=True)
+
+                # If spotDL fails, throw an error showing EXACTLY what spotDL said
+                if result.returncode != 0:
+                    error_msg = result.stderr if result.stderr else result.stdout
+                    raise Exception(f"spotDL Error (Code {result.returncode}): {error_msg}")
                 
                 # Look inside the temp folder for the MP3 spotDL just created
                 downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
                 
                 if not downloaded_files:
-                    raise Exception("spotDL finished, but no MP3 file was found.")
+                    raise Exception("spotDL finished, but no MP3 file was found in folder.")
                 
                 temp_file_path = os.path.join(temp_dir, downloaded_files[0])
                 
@@ -74,7 +79,7 @@ def download_song(spotify_url: str, background_tasks: BackgroundTasks):
                 shutil.move(temp_file_path, file_path)
                 
             finally:
-                # Always delete the temporary folder when we are done, even if it crashed
+                # Always delete the temporary folder when done
                 if os.path.exists(temp_dir):
                     shutil.rmtree(temp_dir)
         
@@ -84,4 +89,4 @@ def download_song(spotify_url: str, background_tasks: BackgroundTasks):
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+        raise HTTPException(status
