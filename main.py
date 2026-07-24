@@ -52,7 +52,7 @@ def get_existing_cover(file_id: str):
     return None
 
 def download_with_ytdlp(search_query: str, temp_dir: str):
-    """Downloads high-res audio using yt-dlp with YouTube cookie authentication & Smart TV bypass."""
+    """Downloads high-res audio using yt-dlp with Node.js JS challenge solver and cookies."""
     print(f"--- [HIGH-QUAL ENGINE] Fetching high-res audio via yt-dlp for '{search_query}' ---", flush=True)
     
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
@@ -71,19 +71,20 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
         except Exception as cookie_err:
             print(f"Failed to write cookie file: {cookie_err}", flush=True)
 
-    # 2. Build yt-dlp command with Smart TV client spoofing and max audio quality
+    # 2. Build yt-dlp command with Node.js runtime flag & Smart TV client
     ytdlp_cmd = [
         sys.executable, "-m", "yt_dlp",
         f"ytsearch1:{search_query} audio",
         "-x",
         "--audio-format", "mp3",
-        "--audio-quality", "0",  # Highest VBR quality (~250-320 kbps)
+        "--audio-quality", "0",  # Max quality VBR (~250-320 kbps)
         "-o", output_template,
         "--no-playlist",
+        "--js-runtimes", "node",  # Enables Node.js for solving YouTube JS challenges
         "--extractor-args", "youtube:player_client=tv_embedded,web_creator"
     ]
 
-    # Attach cookies flag if environment variable was present
+    # Attach cookies flag if available
     if use_cookies:
         ytdlp_cmd.extend(["--cookies", cookie_file_path])
     
