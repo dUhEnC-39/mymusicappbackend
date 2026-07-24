@@ -53,7 +53,7 @@ def get_existing_cover(file_id: str):
     return None
 
 def get_itunes_info(search_query: str):
-    """Fetches clean artist, track title, and 1000x1000 cover art from iTunes API."""
+    """Fetches clean artist name, track title, and 1000x1000 artwork from iTunes API."""
     artist_name = "Unknown Artist"
     song_title = search_query.title()
     cover_bytes = None
@@ -79,47 +79,50 @@ def get_itunes_info(search_query: str):
 
 def download_with_ytdlp(search_query: str, temp_dir: str):
     """
-    Downloads audio using yt-dlp with client fallback profiles
-    and detailed diagnostic logging.
+    Downloads high-res audio via yt-dlp, passing YOUTUBE_COOKIES if configured in Northflank.
     """
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
+    cookie_path = os.path.join(temp_dir, "youtube_cookies.txt")
     
-    # Client configurations to try sequentially
-    client_configs = [
-        "youtube:player_client=ios,mweb",
-        "youtube:player_client=tv_embedded,web_creator",
-        "youtube:player_client=android,web"
+    # Check for YOUTUBE_COOKIES environment variable
+    cookies_data = os.getenv("YOUTUBE_COOKIES")
+    has_cookies = False
+
+    if cookies_data:
+        try:
+            with open(cookie_path, "w", encoding="utf-8") as f:
+                f.write(cookies_data.strip())
+            has_cookies = True
+            print("Successfully loaded YouTube authentication cookies from environment variable!", flush=True)
+        except Exception as cookie_err:
+            print(f"Cookie write error: {cookie_err}", flush=True)
+
+    ytdlp_cmd = [
+        sys.executable, "-m", "yt_dlp",
+        f"ytsearch1:{search_query}",
+        "-x",
+        "--audio-format", "mp3",
+        "--audio-quality", "0",
+        "-o", output_template,
+        "--no-playlist",
+        "--extractor-args", "youtube:player_client=mweb,android,ios"
     ]
 
-    for idx, client_args in enumerate(client_configs, 1):
-        print(f"--- [YT-DLP] Attempt {idx} using profile '{client_args}' ---", flush=True)
-        
-        ytdlp_cmd = [
-            sys.executable, "-m", "yt_dlp",
-            f"ytsearch1:{search_query}",
-            "-x",
-            "--audio-format", "mp3",
-            "--audio-quality", "0",
-            "-o", output_template,
-            "--no-playlist",
-            "--extractor-args", client_args
-        ]
+    if has_cookies:
+        ytdlp_cmd.extend(["--cookies", cookie_path])
 
-        print(f"Executing: {' '.join(ytdlp_cmd)}", flush=True)
-        res = subprocess.run(ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+    print(f"Executing yt-dlp: {' '.join(ytdlp_cmd)}", flush=True)
+    res = subprocess.run(ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
 
-        # Print detailed stdout/stderr to Northflank logs
-        if res.stdout:
-            print(f"[yt-dlp stdout]:\n{res.stdout.strip()}", flush=True)
-        if res.stderr:
-            print(f"[yt-dlp stderr]:\n{res.stderr.strip()}", flush=True)
+    if res.stdout:
+        print(f"[yt-dlp stdout]:\n{res.stdout.strip()}", flush=True)
+    if res.stderr:
+        print(f"[yt-dlp stderr]:\n{res.stderr.strip()}", flush=True)
 
-        mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
-        if res.returncode == 0 and mp3_files:
-            print(f"yt-dlp succeeded on attempt {idx}!", flush=True)
-            return True
-
-        print(f"Attempt {idx} failed. Switching client profile...", flush=True)
+    mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
+    if res.returncode == 0 and mp3_files:
+        print("yt-dlp successfully downloaded the track!", flush=True)
+        return True
 
     return False
 
@@ -133,9 +136,9 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         if os.path.exists(failed_marker):
             os.remove(failed_marker)
 
-        # 1. Fetch clean metadata & 1000x1000 cover art via iTunes API
+        # 1. Fetch clean metadata & artwork via iTunes API
         song_title, artist_name, cover_bytes = get_itunes_info(search_query)
-        print(f"iTunes Resolved Metadata -> Track: '{song_title}', Artist: '{artist_name}'", flush=True)
+        print(f"iTunes Metadata -> Track: '{song_title}', Artist: '{artist_name}'", flush=True)
 
         cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
         if cover_bytes:
@@ -143,22 +146,22 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
                 f.write(cover_bytes)
             print("Saved 1000x1000 iTunes cover art to cache!", flush=True)
 
-        # 2. Construct clean search term for yt-dlp
+        # 2. Build search query
         yt_search_term = f"{artist_name} {song_title} audio" if artist_name != "Unknown Artist" else search_query
 
-        # 3. Execute download engine
+        # 3. Run download engine
         download_success = download_with_ytdlp(yt_search_term, temp_dir)
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if not download_success or not downloaded_files:
-            print("--- [ERROR] All yt-dlp client profiles failed ---", flush=True)
+            print("--- [ERROR] Download engine failed ---", flush=True)
             with open(failed_marker, "w") as f:
-                f.write("All download attempts failed")
+                f.write("Download engine failed")
             return
 
         downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
         
-        # 4. Write clean ID3 tags to MP3 file
+        # 4. Write ID3 tags directly to MP3
         try:
             try:
                 tags = ID3(downloaded_mp3_path)
@@ -171,7 +174,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         except Exception as e:
             print(f"ID3 write notice: {e}", flush=True)
 
-        # 5. Move finished file to cache
+        # 5. Move finished MP3 to primary cache directory
         shutil.move(downloaded_mp3_path, audio_path)
         print(f"--- [SUCCESS] Song processing complete! Saved to {audio_path} ---", flush=True)
 
@@ -230,7 +233,7 @@ def download_song(song: str, background_tasks: BackgroundTasks, request: Request
                 "artist": artist_name
             }
         
-        # 2. Clear old failed marker so user can retry fresh
+        # 2. Always wipe stale failed markers on new incoming requests
         if os.path.exists(failed_marker):
             os.remove(failed_marker)
 
