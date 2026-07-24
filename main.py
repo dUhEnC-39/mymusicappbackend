@@ -308,16 +308,20 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
 
         # 3. Write clean ID3 tags directly to MP3
         try:
+            tags = ID3(downloaded_mp3_path)
+        except ID3NoHeaderError:
+            tags = ID3()
+        except Exception:
+            tags = None
+
+        if tags is not None:
             try:
-                tags = ID3(downloaded_mp3_path)
-            except ID3NoHeaderError:
-                tags = ID3()
-            tags.add(TIT2(encoding=3, text=song_title))
-            tags.add(TPE1(encoding=3, text=artist_name))
-            tags.save(downloaded_mp3_path)
-            print("Successfully embedded clean ID3 tags into MP3!", flush=True)
-        except Exception as e:
-            print(f"ID3 write notice: {e}", flush=True)
+                tags.add(TIT2(encoding=3, text=song_title))
+                tags.add(TPE1(encoding=3, text=artist_name))
+                tags.save(downloaded_mp3_path)
+                print("Successfully embedded clean ID3 tags into MP3!", flush=True)
+            except Exception as e:
+                print(f"ID3 write notice: {e}", flush=True)
 
         # 4. Move finished MP3 to primary cache directory
         shutil.move(downloaded_mp3_path, audio_path)
@@ -365,3 +369,33 @@ def download_song(song: str, background_tasks: BackgroundTasks, request: Request
             artist_name = "Unknown Artist"
             try:
                 tags = ID3(audio_path)
+                song_title = str(tags.get("TIT2", query.title()))
+                artist_name = str(tags.get("TPE1", "Unknown Artist"))
+            except Exception:
+                pass
+
+            return {
+                "status": "ready",
+                "audio_url": f"{base_url}/audio/{audio_file_name}",
+                "cover_url": cover_url,
+                "song_name": song_title,
+                "artist": artist_name
+            }
+
+        # 2. Always wipe stale failed markers on new incoming requests
+        if os.path.exists(failed_marker):
+            os.remove(failed_marker)
+
+        # 3. Queue download task
+        temp_dir = os.path.join(CACHE_DIR, f"temp_{file_id}")
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir, exist_ok=True)
+            background_tasks.add_task(run_media_download_background, clean_query, temp_dir, audio_path, file_id)
+
+        return {
+            "status": "processing",
+            "message": "Song and cover art are processing. Try again in 10-15 seconds."
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
