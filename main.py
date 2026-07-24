@@ -52,135 +52,76 @@ def get_existing_cover(file_id: str):
             return f"{file_id}{ext}"
     return None
 
-def get_youtube_url_from_duckduckgo(search_query: str):
-    """
-    Searches DuckDuckGo HTML to resolve direct YouTube URLs.
-    Handles both raw (watch?v=) and URL-encoded (watch%3Fv%3D) link structures.
-    """
-    print(f"--- [DDG SEARCH] Resolving direct YouTube URL for '{search_query}' ---", flush=True)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    }
-    encoded_query = requests.utils.quote(f"site:youtube.com/watch {search_query}")
-    search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
-    
-    try:
-        res = requests.get(search_url, headers=headers, timeout=10)
-        if res.status_code == 200:
-            video_ids = re.findall(r'(?:watch\?v=|watch%3Fv%3D)([a-zA-Z0-9_-]{11})', res.text)
-            if video_ids:
-                direct_url = f"https://www.youtube.com/watch?v={video_ids[0]}"
-                print(f"--- [DDG SUCCESS] Found direct URL: {direct_url} ---", flush=True)
-                return direct_url
-    except Exception as e:
-        print(f"DuckDuckGo search notice: {e}", flush=True)
-        
-    return None
-
-def download_with_ytdlp(search_query: str, temp_dir: str):
-    """
-    Downloads audio using the exact proven yt-dlp configuration.
-    Zero risky CLI flags added.
-    """
-    target_url = get_youtube_url_from_duckduckgo(search_query)
-    if not target_url:
-        target_url = f"ytsearch1:{search_query}"
-        print(f"--- [FALLBACK] Using native ytsearch1 for '{search_query}' ---", flush=True)
-
-    output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
-    
-    ytdlp_cmd = [
-        sys.executable, "-m", "yt_dlp",
-        target_url,
-        "-x",
-        "--audio-format", "mp3",
-        "--audio-quality", "0",
-        "-o", output_template,
-        "--no-playlist",
-        "--extractor-args", "youtube:player_client=android,mweb"
-    ]
-    
-    print(f"Executing yt-dlp: {' '.join(ytdlp_cmd)}", flush=True)
-    res = subprocess.run(ytdlp_cmd, stdout=None, stderr=None, timeout=60)
-    
-    mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
-    if res.returncode == 0 and mp3_files:
-        print("yt-dlp successfully downloaded high-quality audio track!", flush=True)
-        return True
-    return False
-
-def enrich_metadata_and_cover(search_query: str, downloaded_mp3_path: str, file_id: str):
-    """
-    Fetches clean Artist, Song Title, and 1000x1000 Album Cover via iTunes API
-    completely independently of yt-dlp.
-    """
+def get_itunes_info(search_query: str):
+    """Fetches clean artist, track title, and 1000x1000 cover art from iTunes API."""
     artist_name = "Unknown Artist"
     song_title = search_query.title()
-    cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
+    cover_bytes = None
 
-    # 1. Fetch official track details & 1000x1000 artwork from iTunes API
     try:
-        itunes_url = f"https://itunes.apple.com/search?term={requests.utils.quote(search_query)}&entity=song&limit=1"
-        res = requests.get(itunes_url, timeout=5)
+        url = f"https://itunes.apple.com/search?term={requests.utils.quote(search_query)}&entity=song&limit=1"
+        res = requests.get(url, timeout=5)
         if res.status_code == 200:
             data = res.json()
             if data.get("resultCount", 0) > 0:
                 track = data["results"][0]
                 artist_name = track.get("artistName", artist_name)
                 song_title = track.get("trackName", song_title)
-                
-                artwork_url = track.get("artworkUrl100", "").replace("100x100bb", "1000x1000bb")
-                if artwork_url:
-                    img_res = requests.get(artwork_url, timeout=10)
+                art_url = track.get("artworkUrl100", "").replace("100x100bb", "1000x1000bb")
+                if art_url:
+                    img_res = requests.get(art_url, timeout=5)
                     if img_res.status_code == 200:
-                        with open(cover_output_path, "wb") as f:
-                            f.write(img_res.content)
-                        print("Successfully saved 1000x1000 artwork from iTunes!", flush=True)
+                        cover_bytes = img_res.content
     except Exception as e:
-        print(f"iTunes API notice: {e}", flush=True)
+        print(f"iTunes API Notice: {e}", flush=True)
 
-    # 2. Fallback SACAD search if iTunes missed artwork
-    if not os.path.exists(cover_output_path):
-        try:
-            sacad_cmd = [
-                sys.executable, "-m", "sacad", 
-                artist_name, 
-                song_title, 
-                "1000", 
-                cover_output_path
-            ]
-            print(f"Running SACAD artwork search for '{artist_name}' - '{song_title}'...", flush=True)
-            sacad_res = subprocess.run(sacad_cmd, stdout=None, stderr=None, timeout=15)
-            if sacad_res.returncode == 0 and os.path.exists(cover_output_path):
-                print("SACAD successfully downloaded cover art!", flush=True)
-        except Exception as sacad_err:
-            print(f"SACAD notice: {sacad_err}", flush=True)
+    return song_title, artist_name, cover_bytes
 
-    # 3. Fallback title/artist parsing if iTunes missed
-    if artist_name == "Unknown Artist":
-        if " - " in search_query:
-            parts = search_query.split(" - ", 1)
-            artist_name = parts[0].strip().title()
-            song_title = parts[1].strip().title()
-        elif len(search_query.split()) >= 2:
-            words = search_query.title().split()
-            artist_name = words[-1]
-            song_title = " ".join(words[:-1])
+def download_with_ytdlp(search_query: str, temp_dir: str):
+    """
+    Downloads audio using yt-dlp with client fallback profiles
+    and detailed diagnostic logging.
+    """
+    output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
+    
+    # Client configurations to try sequentially
+    client_configs = [
+        "youtube:player_client=ios,mweb",
+        "youtube:player_client=tv_embedded,web_creator",
+        "youtube:player_client=android,web"
+    ]
 
-    # 4. Write clean ID3 tags directly into the MP3 file
-    try:
-        try:
-            tags = ID3(downloaded_mp3_path)
-        except ID3NoHeaderError:
-            tags = ID3()
-        tags.add(TIT2(encoding=3, text=song_title))
-        tags.add(TPE1(encoding=3, text=artist_name))
-        tags.save(downloaded_mp3_path)
-    except Exception as e:
-        print(f"ID3 write notice: {e}", flush=True)
+    for idx, client_args in enumerate(client_configs, 1):
+        print(f"--- [YT-DLP] Attempt {idx} using profile '{client_args}' ---", flush=True)
+        
+        ytdlp_cmd = [
+            sys.executable, "-m", "yt_dlp",
+            f"ytsearch1:{search_query}",
+            "-x",
+            "--audio-format", "mp3",
+            "--audio-quality", "0",
+            "-o", output_template,
+            "--no-playlist",
+            "--extractor-args", client_args
+        ]
 
-    print(f"Final Metadata -> Song: '{song_title}', Artist: '{artist_name}'", flush=True)
-    return song_title, artist_name
+        print(f"Executing: {' '.join(ytdlp_cmd)}", flush=True)
+        res = subprocess.run(ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+
+        # Print detailed stdout/stderr to Northflank logs
+        if res.stdout:
+            print(f"[yt-dlp stdout]:\n{res.stdout.strip()}", flush=True)
+        if res.stderr:
+            print(f"[yt-dlp stderr]:\n{res.stderr.strip()}", flush=True)
+
+        mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
+        if res.returncode == 0 and mp3_files:
+            print(f"yt-dlp succeeded on attempt {idx}!", flush=True)
+            return True
+
+        print(f"Attempt {idx} failed. Switching client profile...", flush=True)
+
+    return False
 
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
     """Background task to run download, apply metadata, and save to cache."""
@@ -192,30 +133,45 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         if os.path.exists(failed_marker):
             os.remove(failed_marker)
 
-        spotdl_cache_folder = os.path.expanduser("~/.spotdl")
-        if os.path.exists(spotdl_cache_folder):
-            try:
-                shutil.rmtree(spotdl_cache_folder, ignore_errors=True)
-            except Exception:
-                pass
+        # 1. Fetch clean metadata & 1000x1000 cover art via iTunes API
+        song_title, artist_name, cover_bytes = get_itunes_info(search_query)
+        print(f"iTunes Resolved Metadata -> Track: '{song_title}', Artist: '{artist_name}'", flush=True)
 
-        # Execute the working yt-dlp downloader
-        download_success = download_with_ytdlp(search_query, temp_dir)
+        cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
+        if cover_bytes:
+            with open(cover_output_path, "wb") as f:
+                f.write(cover_bytes)
+            print("Saved 1000x1000 iTunes cover art to cache!", flush=True)
+
+        # 2. Construct clean search term for yt-dlp
+        yt_search_term = f"{artist_name} {song_title} audio" if artist_name != "Unknown Artist" else search_query
+
+        # 3. Execute download engine
+        download_success = download_with_ytdlp(yt_search_term, temp_dir)
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if not download_success or not downloaded_files:
-            print("--- [ERROR] Download engine failed to produce an MP3 ---", flush=True)
+            print("--- [ERROR] All yt-dlp client profiles failed ---", flush=True)
             with open(failed_marker, "w") as f:
-                f.write("Download engines failed")
+                f.write("All download attempts failed")
             return
 
         downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
-        print(f"Downloaded MP3 ready: {downloaded_files[0]}", flush=True)
+        
+        # 4. Write clean ID3 tags to MP3 file
+        try:
+            try:
+                tags = ID3(downloaded_mp3_path)
+            except ID3NoHeaderError:
+                tags = ID3()
+            tags.add(TIT2(encoding=3, text=song_title))
+            tags.add(TPE1(encoding=3, text=artist_name))
+            tags.save(downloaded_mp3_path)
+            print("Successfully embedded clean ID3 tags into MP3!", flush=True)
+        except Exception as e:
+            print(f"ID3 write notice: {e}", flush=True)
 
-        # Enrich Metadata & Cover Art via Python
-        enrich_metadata_and_cover(search_query, downloaded_mp3_path, file_id)
-
-        # Move final file to primary cache
+        # 5. Move finished file to cache
         shutil.move(downloaded_mp3_path, audio_path)
         print(f"--- [SUCCESS] Song processing complete! Saved to {audio_path} ---", flush=True)
 
@@ -274,7 +230,7 @@ def download_song(song: str, background_tasks: BackgroundTasks, request: Request
                 "artist": artist_name
             }
         
-        # 2. Always wipe stale failed markers on new incoming requests
+        # 2. Clear old failed marker so user can retry fresh
         if os.path.exists(failed_marker):
             os.remove(failed_marker)
 
