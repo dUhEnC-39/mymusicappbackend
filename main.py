@@ -81,7 +81,7 @@ def get_itunes_info(search_query: str):
 def download_with_ytdlp(search_query: str, temp_dir: str):
     """
     Downloads high-res audio via yt-dlp.
-    Dynamically switches player client depending on whether cookies are active.
+    Cycles player clients (web, tv_embedded, android_music) to bypass JS decipher errors.
     """
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     cookie_path = os.path.join(temp_dir, "youtube_cookies.txt")
@@ -100,42 +100,44 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
         except Exception as cookie_err:
             print(f"Base64 cookie decoding error: {cookie_err}", flush=True)
 
-    ytdlp_cmd = [
-        sys.executable, "-m", "yt_dlp",
-        f"ytsearch1:{search_query}",
-        "-x",
-        "--audio-format", "mp3",
-        "--audio-quality", "0",
-        "-o", output_template,
-        "--no-playlist"
+    # Client strategies to cycle through
+    client_strategies = [
+        "youtube:player_client=web",
+        "youtube:player_client=tv_embedded",
+        "youtube:player_client=android_music,mweb"
     ]
 
-    # Use web client when cookies are present; mobile clients otherwise
-    if has_cookies:
-        ytdlp_cmd.extend([
-            "--cookies", cookie_path,
-            "--extractor-args", "youtube:player_client=web"
-        ])
-    else:
-        ytdlp_cmd.extend([
-            "--extractor-args", "youtube:player_client=mweb,ios,android"
-        ])
+    for idx, strategy in enumerate(client_strategies, 1):
+        print(f"--- [YT-DLP] Trying strategy {idx}: {strategy} ---", flush=True)
+        
+        ytdlp_cmd = [
+            sys.executable, "-m", "yt_dlp",
+            f"ytsearch1:{search_query}",
+            "-x",
+            "--audio-format", "mp3",
+            "--audio-quality", "0",
+            "-o", output_template,
+            "--no-playlist",
+            "--extractor-args", strategy
+        ]
 
-    print(f"Executing yt-dlp command...", flush=True)
-    res = subprocess.run(ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+        if has_cookies and "web" in strategy:
+            ytdlp_cmd.extend(["--cookies", cookie_path])
 
-    if res.stdout:
-        print(f"[yt-dlp stdout]:\n{res.stdout.strip()}", flush=True)
-    if res.stderr:
-        print(f"[yt-dlp stderr]:\n{res.stderr.strip()}", flush=True)
+        print(f"Executing command: {' '.join(ytdlp_cmd)}", flush=True)
+        res = subprocess.run(ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
 
-    mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
-    if res.returncode == 0 and mp3_files:
-        print("yt-dlp successfully downloaded audio stream!", flush=True)
-        return True
+        if res.stdout:
+            print(f"[yt-dlp stdout]:\n{res.stdout.strip()}", flush=True)
+        if res.stderr:
+            print(f"[yt-dlp stderr]:\n{res.stderr.strip()}", flush=True)
+
+        mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
+        if res.returncode == 0 and mp3_files:
+            print(f"yt-dlp successfully downloaded audio stream using strategy {idx}!", flush=True)
+            return True
 
     return False
-
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
     """Background task to run download, apply metadata, and save to cache."""
     failed_marker = os.path.join(CACHE_DIR, f"{file_id}.failed")
