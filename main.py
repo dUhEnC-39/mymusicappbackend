@@ -51,62 +51,80 @@ def get_existing_cover(file_id: str):
             return f"{file_id}{ext}"
     return None
 
+def download_with_ytdlp(search_query: str, temp_dir: str):
+    """Fallback downloader using yt-dlp directly (bypasses Spotify API rate limits)."""
+    print(f"--- [FALLBACK] Attempting direct download via yt-dlp for '{search_query}' ---", flush=True)
+    ytdlp_cmd = [
+        sys.executable, "-m", "yt_dlp",
+        f"ytsearch1:{search_query}",
+        "-x",
+        "--audio-format", "mp3",
+        "--audio-quality", "0",
+        "-o", os.path.join(temp_dir, "downloaded_track.%(ext)s"),
+        "--no-playlist"
+    ]
+    res = subprocess.run(ytdlp_cmd, stdout=None, stderr=None, timeout=45)
+    return res.returncode == 0
+
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
-    """Downloads audio, extracts metadata, and fetches cover art with full error trapping."""
+    """Downloads audio via spotDL or yt-dlp fallback, extracts metadata, and fetches cover art."""
     failed_marker = os.path.join(CACHE_DIR, f"{file_id}.failed")
     
     try:
         print(f"--- [START] Processing query: '{search_query}' ---", flush=True)
         
-        # Clear old failure marker if retrying
         if os.path.exists(failed_marker):
             os.remove(failed_marker)
 
-        # 1. Clear out stale spotDL cache folder to force fresh API token fetching
+        # 1. Clear out stale spotDL cache directory
         spotdl_cache_folder = os.path.expanduser("~/.spotdl")
         if os.path.exists(spotdl_cache_folder):
             try:
                 shutil.rmtree(spotdl_cache_folder, ignore_errors=True)
-                print("Cleared stale spotDL cache directory.", flush=True)
-            except Exception as cache_err:
-                print(f"Cache clear notice: {cache_err}", flush=True)
+            except Exception:
+                pass
 
-        # 2. Build clean spotDL command
-        # Environment variables (SPOTIPY_CLIENT_ID / SECRET) are passed automatically by Northflank
+        # 2. Try spotDL first with a strict 15-second timeout
+        download_success = False
         download_cmd = [
             sys.executable, "-m", "spotdl", 
             search_query,
             "--output-format", "mp3"
         ]
 
-        print(f"Executing: {' '.join(download_cmd)}", flush=True)
+        print(f"Executing spotDL: {' '.join(download_cmd)}", flush=True)
         
-        # Stream output directly to console for live Northflank visibility
-        result = subprocess.run(
-            download_cmd, 
-            cwd=temp_dir, 
-            stdout=None, 
-            stderr=None, 
-            timeout=90
-        )
-        
-        if result.returncode != 0:
-            print(f"--- [ERROR] spotDL returned exit code {result.returncode} ---", flush=True)
-            with open(failed_marker, "w") as f:
-                f.write(f"spotdl failed with code {result.returncode}")
-            return
+        try:
+            result = subprocess.run(
+                download_cmd, 
+                cwd=temp_dir, 
+                stdout=None, 
+                stderr=None, 
+                timeout=15  # Short timeout so we don't freeze on rate limits
+            )
+            if result.returncode == 0 and any(f.endswith(".mp3") for f in os.listdir(temp_dir)):
+                download_success = True
+                print("spotDL download successful!", flush=True)
+            else:
+                print("spotDL returned non-zero exit code or no MP3.", flush=True)
+        except (subprocess.TimeoutExpired, Exception) as spotdl_err:
+            print(f"spotDL hit limit/timeout ({spotdl_err}). Switching to yt-dlp fallback...", flush=True)
+
+        # 3. If spotDL failed or timed out, use yt-dlp fallback
+        if not download_success:
+            download_success = download_with_ytdlp(search_query, temp_dir)
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
-        if not downloaded_files:
-            print("--- [ERROR] No MP3 produced in temp directory ---", flush=True)
+        if not download_success or not downloaded_files:
+            print("--- [ERROR] All download engines failed to produce an MP3 ---", flush=True)
             with open(failed_marker, "w") as f:
-                f.write("No MP3 file produced")
+                f.write("Download engines failed")
             return
 
         downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
-        print(f"Downloaded MP3 found: {downloaded_files[0]}", flush=True)
+        print(f"Downloaded MP3 ready: {downloaded_files[0]}", flush=True)
         
-        # 3. Extract metadata
+        # 4. Extract metadata
         artist_name = "Unknown Artist"
         album_name = "Unknown Album"
         try:
@@ -115,32 +133,35 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             album_name = str(tags.get("TALB", "Unknown Album"))
             print(f"Extracted Metadata -> Artist: '{artist_name}', Album: '{album_name}'", flush=True)
         except (ID3NoHeaderError, Exception) as tag_err:
-            print(f"Could not read ID3 tags: {tag_err}", flush=True)
+            print(f"Metadata tag notice: {tag_err}", flush=True)
 
-        # 4. Fetch 1000x1000 cover art using SACAD
+        # 5. Fetch 1000x1000 cover art using SACAD
         cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
-        if artist_name != "Unknown Artist" and album_name != "Unknown Album":
-            try:
-                sacad_cmd = [
-                    sys.executable, "-m", "sacad", 
-                    artist_name, 
-                    album_name, 
-                    "1000", 
-                    cover_output_path
-                ]
-                print("Running SACAD for high-res artwork...", flush=True)
-                sacad_res = subprocess.run(
-                    sacad_cmd, 
-                    stdout=None, 
-                    stderr=None, 
-                    timeout=30
-                )
-                if sacad_res.returncode == 0 and os.path.exists(cover_output_path):
-                    print("SACAD successfully downloaded 1000x1000 cover art!", flush=True)
-            except Exception as sacad_err:
-                print(f"SACAD error: {sacad_err}", flush=True)
+        
+        # Parse search query for artist/album if ID3 tags are missing
+        search_parts = search_query.split(" ")
+        query_artist = search_parts[-1] if len(search_parts) > 1 else search_query
+        query_album = search_query
 
-        # Fallback: Extract embedded cover art from MP3 if SACAD fails
+        sacad_artist = artist_name if artist_name != "Unknown Artist" else query_artist
+        sacad_album = album_name if album_name != "Unknown Album" else query_album
+
+        try:
+            sacad_cmd = [
+                sys.executable, "-m", "sacad", 
+                sacad_artist, 
+                sacad_album, 
+                "1000", 
+                cover_output_path
+            ]
+            print(f"Running SACAD artwork search for '{sacad_artist}' - '{sacad_album}'...", flush=True)
+            sacad_res = subprocess.run(sacad_cmd, stdout=None, stderr=None, timeout=25)
+            if sacad_res.returncode == 0 and os.path.exists(cover_output_path):
+                print("SACAD successfully downloaded 1000x1000 cover art!", flush=True)
+        except Exception as sacad_err:
+            print(f"SACAD notice: {sacad_err}", flush=True)
+
+        # Fallback: Extract embedded cover art from MP3 if SACAD missed
         if not os.path.exists(cover_output_path):
             try:
                 tags = ID3(downloaded_mp3_path)
@@ -151,16 +172,11 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
                         print("Fallback: Extracted embedded cover art from MP3!", flush=True)
                         break
             except Exception as embed_err:
-                print(f"Embedded art fallback error: {embed_err}", flush=True)
+                print(f"Embedded art fallback notice: {embed_err}", flush=True)
 
-        # 5. Move final MP3 to primary cache directory
+        # 6. Save final MP3 to primary cache directory
         shutil.move(downloaded_mp3_path, audio_path)
         print(f"--- [SUCCESS] Song processing complete! Saved to {audio_path} ---", flush=True)
-
-    except subprocess.TimeoutExpired:
-        print("--- [TIMEOUT] spotDL timed out after 90s ---", flush=True)
-        with open(failed_marker, "w") as f:
-            f.write("Timeout expired during download")
 
     except Exception as e:
         print(f"--- [CRASH] Exception: {e} ---", flush=True)
