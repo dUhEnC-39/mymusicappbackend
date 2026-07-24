@@ -81,7 +81,7 @@ def get_itunes_info(search_query: str):
 def download_with_ytdlp(search_query: str, temp_dir: str):
     """
     Downloads high-res audio via yt-dlp.
-    Uses Base64 cookies + web client, with SoundCloud fallback.
+    Prioritizes SoundCloud (fast, no cookies required), with YouTube as fallback.
     """
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     cookie_path = os.path.join(temp_dir, "youtube_cookies.txt")
@@ -94,17 +94,14 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
             decoded_bytes = base64.b64decode(b64_cookies.strip())
             with open(cookie_path, "wb") as f:
                 f.write(decoded_bytes)
-            
             has_cookies = True
-            print(f"Successfully decoded Base64 cookie file to disk! ({os.path.getsize(cookie_path)} bytes)", flush=True)
-        except Exception as cookie_err:
-            print(f"Base64 cookie decoding error: {cookie_err}", flush=True)
+        except Exception:
+            pass
 
-    # Strategy 1: YouTube with Cookies & Web client
-    # Strategy 2: SoundCloud search (unblocked fallback)
+    # Try SoundCloud first (fastest on cloud servers), then YouTube
     search_targets = [
-        ("youtube", f"ytsearch1:{search_query}"),
-        ("soundcloud", f"scsearch1:{search_query}")
+        ("soundcloud", f"scsearch1:{search_query}"),
+        ("youtube", f"ytsearch1:{search_query}")
     ]
 
     for source_name, target_url in search_targets:
@@ -120,23 +117,20 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
             "--no-playlist"
         ]
 
-        if source_name == "youtube":
-            if has_cookies:
-                ytdlp_cmd.extend(["--cookies", cookie_path, "--extractor-args", "youtube:player_client=web,mweb"])
-            else:
-                ytdlp_cmd.extend(["--extractor-args", "youtube:player_client=mweb,android"])
+        if source_name == "youtube" and has_cookies:
+            ytdlp_cmd.extend(["--cookies", cookie_path, "--extractor-args", "youtube:player_client=web,mweb"])
 
         print(f"Executing command: {' '.join(ytdlp_cmd)}", flush=True)
         res = subprocess.run(ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
 
         if res.stdout:
-            print(f"[yt-dlp stdout]:\n{res.stdout.strip()}", flush=True)
+            print(f"[{source_name} stdout]:\n{res.stdout.strip()}", flush=True)
         if res.stderr:
-            print(f"[yt-dlp stderr]:\n{res.stderr.strip()}", flush=True)
+            print(f"[{source_name} stderr]:\n{res.stderr.strip()}", flush=True)
 
         mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if res.returncode == 0 and mp3_files:
-            print(f"yt-dlp successfully downloaded audio stream using {source_name}!", flush=True)
+            print(f"Successfully downloaded audio stream using {source_name}!", flush=True)
             return True
 
     return False
