@@ -80,7 +80,8 @@ def get_itunes_info(search_query: str):
 
 def download_with_ytdlp(search_query: str, temp_dir: str):
     """
-    Downloads high-res audio via yt-dlp by decoding Base64 cookies string onto disk.
+    Downloads high-res audio via yt-dlp.
+    Dynamically switches player client depending on whether cookies are active.
     """
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     cookie_path = os.path.join(temp_dir, "youtube_cookies.txt")
@@ -90,7 +91,6 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
 
     if b64_cookies:
         try:
-            # Decode Base64 string back into the exact original cookies.txt file
             decoded_bytes = base64.b64decode(b64_cookies.strip())
             with open(cookie_path, "wb") as f:
                 f.write(decoded_bytes)
@@ -107,12 +107,19 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
         "--audio-format", "mp3",
         "--audio-quality", "0",
         "-o", output_template,
-        "--no-playlist",
-        "--extractor-args", "youtube:player_client=mweb,ios,android"
+        "--no-playlist"
     ]
 
+    # Use web client when cookies are present; mobile clients otherwise
     if has_cookies:
-        ytdlp_cmd.extend(["--cookies", cookie_path])
+        ytdlp_cmd.extend([
+            "--cookies", cookie_path,
+            "--extractor-args", "youtube:player_client=web"
+        ])
+    else:
+        ytdlp_cmd.extend([
+            "--extractor-args", "youtube:player_client=mweb,ios,android"
+        ])
 
     print(f"Executing yt-dlp command...", flush=True)
     res = subprocess.run(ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
