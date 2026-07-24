@@ -77,68 +77,41 @@ def get_itunes_info(search_query: str):
 
     return song_title, artist_name, cover_bytes
 
-def download_with_ytdlp_ios(search_query: str, temp_dir: str):
+def resolve_youtube_video_id(search_query: str):
     """
-    Primary Engine: Uses yt-dlp with the iOS client profile.
-    iOS client profile bypasses web BotGuard and cookie requirements.
+    Resolves YouTube Video ID via public Invidious REST APIs without scraping HTML.
     """
-    output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
-    
-    print(f"--- [PRIMARY ENGINE] Running yt-dlp iOS client for '{search_query}' ---", flush=True)
-    
-    ytdlp_cmd = [
-        sys.executable, "-m", "yt_dlp",
-        f"ytsearch1:{search_query}",
-        "-x",
-        "--audio-format", "mp3",
-        "--audio-quality", "0",
-        "-o", output_template,
-        "--no-playlist",
-        "--extractor-args", "youtube:player_client=ios,mweb"
-    ]
-
-    res = subprocess.run(ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
-
-    if res.stdout:
-        print(f"[yt-dlp stdout]:\n{res.stdout.strip()}", flush=True)
-    if res.stderr:
-        print(f"[yt-dlp stderr]:\n{res.stderr.strip()}", flush=True)
-
-    mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
-    if res.returncode == 0 and mp3_files:
-        print("--- [SUCCESS] yt-dlp iOS client downloaded track! ---", flush=True)
-        return True
-
-    return False
-
-def download_via_cobalt(search_query: str, output_mp3_path: str):
-    """
-    Fallback Engine: Uses Cobalt API to resolve and download the audio stream.
-    """
-    print(f"--- [FALLBACK ENGINE] Attempting Cobalt extraction for '{search_query}' ---", flush=True)
-    
-    # 1. Resolve YouTube video URL via DuckDuckGo HTML search
+    print(f"--- [RESOLVER] Querying Invidious APIs for '{search_query}' ---", flush=True)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
-    encoded_query = requests.utils.quote(f"site:youtube.com/watch {search_query}")
-    search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
     
-    youtube_url = None
-    try:
-        res = requests.get(search_url, headers=headers, timeout=8)
-        if res.status_code == 200:
-            video_ids = re.findall(r'(?:watch\?v=|watch%3Fv%3D)([a-zA-Z0-9_-]{11})', res.text)
-            if video_ids:
-                youtube_url = f"https://www.youtube.com/watch?v={video_ids[0]}"
-                print(f"Resolved YouTube URL: {youtube_url}", flush=True)
-    except Exception as e:
-        print(f"DuckDuckGo search notice: {e}", flush=True)
+    invidious_instances = [
+        "https://inv.tux.pizza",
+        "https://invidious.nerdvpn.de",
+        "https://invidious.drgns.space",
+        "https://inv.nadeko.net"
+    ]
 
-    if not youtube_url:
-        return False
+    for api_base in invidious_instances:
+        try:
+            search_url = f"{api_base}/api/v1/search?q={requests.utils.quote(search_query)}&type=video"
+            res = requests.get(search_url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                items = res.json()
+                if isinstance(items, list) and len(items) > 0:
+                    video_id = items[0].get("videoId")
+                    if video_id:
+                        print(f"--- [RESOLVER SUCCESS] Resolved Video ID '{video_id}' via {api_base} ---", flush=True)
+                        return video_id, api_base
+        except Exception as e:
+            print(f"Resolver notice on {api_base}: {e}", flush=True)
 
-    # 2. Query Cobalt API
+    return None, None
+
+def download_via_cobalt(youtube_url: str, output_mp3_path: str):
+    """Downloads audio stream via Cobalt API."""
+    print(f"--- [COBALT ENGINE] Processing '{youtube_url}' ---", flush=True)
     cobalt_headers = {
         "Accept": "application/json",
         "Content-Type": "application/json"
@@ -150,12 +123,12 @@ def download_via_cobalt(search_query: str, output_mp3_path: str):
     }
 
     try:
-        cobalt_res = requests.post("https://api.cobalt.tools/", json=payload, headers=cobalt_headers, timeout=10)
-        if cobalt_res.status_code == 200:
-            data = cobalt_res.json()
+        res = requests.post("https://api.cobalt.tools/", json=payload, headers=cobalt_headers, timeout=12)
+        if res.status_code == 200:
+            data = res.json()
             direct_link = data.get("url")
             if direct_link:
-                print("Cobalt returned direct audio stream URL. Downloading...", flush=True)
+                print("Cobalt returned stream URL. Downloading MP3...", flush=True)
                 with requests.get(direct_link, stream=True, timeout=30) as audio_res:
                     if audio_res.status_code == 200:
                         with open(output_mp3_path, "wb") as f:
@@ -163,10 +136,42 @@ def download_via_cobalt(search_query: str, output_mp3_path: str):
                                 f.write(chunk)
                         
                         if os.path.exists(output_mp3_path) and os.path.getsize(output_mp3_path) > 100000:
-                            print("--- [SUCCESS] Cobalt downloaded audio stream! ---", flush=True)
+                            print("--- [SUCCESS] Downloaded audio via Cobalt API! ---", flush=True)
                             return True
     except Exception as e:
         print(f"Cobalt notice: {e}", flush=True)
+
+    return False
+
+def download_via_invidious_stream(api_base: str, video_id: str, output_mp3_path: str):
+    """Fallback Engine: Downloads adaptive audio stream from Invidious and converts via ffmpeg."""
+    print(f"--- [FALLBACK ENGINE] Downloading stream directly from {api_base} ---", flush=True)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    try:
+        stream_res = requests.get(f"{api_base}/api/v1/videos/{video_id}", headers=headers, timeout=8)
+        if stream_res.status_code == 200:
+            adaptive_formats = stream_res.json().get("adaptiveFormats", [])
+            audio_streams = [f for f in adaptive_formats if f.get("type", "").startswith("audio/")]
+            if audio_streams:
+                audio_streams.sort(key=lambda x: int(x.get("bitrate", 0)), reverse=True)
+                direct_stream_url = audio_streams[0]["url"]
+
+                ffmpeg_cmd = [
+                    "ffmpeg", "-y",
+                    "-headers", "User-Agent: Mozilla/5.0\r\n",
+                    "-i", direct_stream_url,
+                    "-vn", "-ar", "44100", "-ac", "2", "-b:a", "192k",
+                    output_mp3_path
+                ]
+
+                res = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45)
+                if res.returncode == 0 and os.path.exists(output_mp3_path) and os.path.getsize(output_mp3_path) > 100000:
+                    print(f"--- [SUCCESS] Stream converted to MP3 via {api_base}! ---", flush=True)
+                    return True
+    except Exception as e:
+        print(f"Invidious stream notice: {e}", flush=True)
 
     return False
 
@@ -190,43 +195,48 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
                 f.write(cover_bytes)
             print("Saved 1000x1000 iTunes cover art to cache!", flush=True)
 
-        # 2. Build search query
+        # 2. Build search query & resolve YouTube video ID
         clean_search_term = f"{artist_name} {song_title}" if artist_name != "Unknown Artist" else search_query
+        video_id, working_node = resolve_youtube_video_id(clean_search_term)
 
-        # 3. Try Primary Engine (yt-dlp iOS)
-        download_success = download_with_ytdlp_ios(clean_search_term, temp_dir)
+        if not video_id:
+            print("--- [ERROR] Could not resolve YouTube Video ID ---", flush=True)
+            with open(failed_marker, "w") as f:
+                f.write("Failed to resolve video ID")
+            return
 
-        # 4. Try Fallback Engine (Cobalt) if primary failed
-        downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
-        if not download_success or not downloaded_files:
-            print("Primary engine missed. Switching to Fallback Engine (Cobalt)...", flush=True)
-            fallback_mp3 = os.path.join(temp_dir, "downloaded_track.mp3")
-            download_success = download_via_cobalt(clean_search_term, fallback_mp3)
-            downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+        temp_mp3 = os.path.join(temp_dir, "downloaded_track.mp3")
 
-        if not download_success or not downloaded_files:
-            print("--- [ERROR] All download engines failed ---", flush=True)
+        # 3. Try Primary Engine (Cobalt API)
+        download_success = download_via_cobalt(youtube_url, temp_mp3)
+
+        # 4. Try Fallback Engine (Invidious Direct Stream) if Cobalt missed
+        if not download_success or not os.path.exists(temp_mp3):
+            print("Cobalt missed. Switching to Fallback Direct Stream Engine...", flush=True)
+            download_success = download_via_invidious_stream(working_node, video_id, temp_mp3)
+
+        if not download_success or not os.path.exists(temp_mp3):
+            print("--- [ERROR] All engines failed to produce MP3 ---", flush=True)
             with open(failed_marker, "w") as f:
                 f.write("Download failed")
             return
 
-        downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
-        
-        # 5. Write ID3 tags directly to MP3
+        # 5. Write clean ID3 tags directly to MP3
         try:
             try:
-                tags = ID3(downloaded_mp3_path)
+                tags = ID3(temp_mp3)
             except ID3NoHeaderError:
                 tags = ID3()
             tags.add(TIT2(encoding=3, text=song_title))
             tags.add(TPE1(encoding=3, text=artist_name))
-            tags.save(downloaded_mp3_path)
+            tags.save(temp_mp3)
             print("Successfully embedded clean ID3 tags into MP3!", flush=True)
         except Exception as e:
             print(f"ID3 write notice: {e}", flush=True)
 
         # 6. Move finished MP3 to primary cache directory
-        shutil.move(downloaded_mp3_path, audio_path)
+        shutil.move(temp_mp3, audio_path)
         print(f"--- [SUCCESS] Song processing complete! Saved to {audio_path} ---", flush=True)
 
     except Exception as e:
