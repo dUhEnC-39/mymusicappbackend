@@ -52,46 +52,34 @@ def get_existing_cover(file_id: str):
     return None
 
 def download_with_ytdlp(search_query: str, temp_dir: str):
-    """Fallback downloader using yt-dlp directly with iOS/Android client spoofing and SoundCloud backup."""
-    print(f"--- [FALLBACK] Attempting direct download via yt-dlp for '{search_query}' ---", flush=True)
+    """Bypasses cloud bot checks using YouTube's TV Embedded client for max audio quality."""
+    print(f"--- [HIGH-QUAL ENGINE] Fetching high-res audio via yt-dlp for '{search_query}' ---", flush=True)
     
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     
-    # 1. Try YouTube Search with mobile client spoofing to bypass cloud IP bot checks
+    # Force 'tv_embedded' & 'web_creator' client spoofing to completely bypass bot sign-in requirements
     ytdlp_cmd = [
         sys.executable, "-m", "yt_dlp",
-        f"ytsearch1:{search_query}",
+        f"ytsearch1:{search_query} audio",
         "-x",
         "--audio-format", "mp3",
-        "--audio-quality", "0",
+        "--audio-quality", "0",  # Highest VBR MP3 quality (~250-320 kbps)
         "-o", output_template,
         "--no-playlist",
-        "--extractor-args", "youtube:player_client=ios,android,mweb"
+        "--extractor-args", "youtube:player_client=tv_embedded,web_creator"
     ]
     
-    print(f"Executing yt-dlp (YouTube): {' '.join(ytdlp_cmd)}", flush=True)
-    res = subprocess.run(ytdlp_cmd, stdout=None, stderr=None, timeout=45)
+    print(f"Executing yt-dlp (Smart TV Bypass): {' '.join(ytdlp_cmd)}", flush=True)
+    res = subprocess.run(ytdlp_cmd, stdout=None, stderr=None, timeout=60)
     
     if res.returncode == 0 and any(f.endswith(".mp3") for f in os.listdir(temp_dir)):
-        print("yt-dlp (YouTube) successfully downloaded the track!", flush=True)
+        print("yt-dlp successfully grabbed high-quality audio stream!", flush=True)
         return True
 
-    # 2. If YouTube blocks the cloud IP, fallback to SoundCloud search
-    print("--- [FALLBACK 2] YouTube blocked request. Trying SoundCloud search via yt-dlp... ---", flush=True)
-    ytdlp_sc_cmd = [
-        sys.executable, "-m", "yt_dlp",
-        f"scsearch1:{search_query}",
-        "-x",
-        "--audio-format", "mp3",
-        "--audio-quality", "0",
-        "-o", output_template,
-        "--no-playlist"
-    ]
-    res_sc = subprocess.run(ytdlp_sc_cmd, stdout=None, stderr=None, timeout=45)
-    return res_sc.returncode == 0 and any(f.endswith(".mp3") for f in os.listdir(temp_dir))
+    return False
 
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
-    """Downloads audio via spotDL or yt-dlp fallback, extracts metadata, and fetches cover art."""
+    """Downloads audio, extracts metadata, and fetches 1000x1000 cover art."""
     failed_marker = os.path.join(CACHE_DIR, f"{file_id}.failed")
     
     try:
@@ -108,8 +96,9 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception:
                 pass
 
-        # 2. Try spotDL first with a strict 15-second timeout
         download_success = False
+
+        # 2. Try spotDL with a tight 10-second timeout
         download_cmd = [
             sys.executable, "-m", "spotdl", 
             search_query,
@@ -124,23 +113,21 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
                 cwd=temp_dir, 
                 stdout=None, 
                 stderr=None, 
-                timeout=15  # Short timeout so we don't freeze on rate limits
+                timeout=10
             )
             if result.returncode == 0 and any(f.endswith(".mp3") for f in os.listdir(temp_dir)):
                 download_success = True
                 print("spotDL download successful!", flush=True)
-            else:
-                print("spotDL returned non-zero exit code or no MP3.", flush=True)
-        except (subprocess.TimeoutExpired, Exception) as spotdl_err:
-            print(f"spotDL hit limit/timeout ({spotdl_err}). Switching to yt-dlp fallback...", flush=True)
+        except Exception:
+            print("spotDL hit limit or timed out. Switching to Smart TV YouTube engine...", flush=True)
 
-        # 3. If spotDL failed or timed out, use yt-dlp fallback
+        # 3. Use Smart TV yt-dlp bypass engine
         if not download_success:
             download_success = download_with_ytdlp(search_query, temp_dir)
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if not download_success or not downloaded_files:
-            print("--- [ERROR] All download engines failed to produce an MP3 ---", flush=True)
+            print("--- [ERROR] Download engine failed to produce an MP3 ---", flush=True)
             with open(failed_marker, "w") as f:
                 f.write("Download engines failed")
             return
@@ -162,7 +149,6 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         # 5. Fetch 1000x1000 cover art using SACAD
         cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
         
-        # Parse search query for artist/album if ID3 tags are missing
         search_parts = search_query.split(" ")
         query_artist = search_parts[-1] if len(search_parts) > 1 else search_query
         query_album = search_query
@@ -272,3 +258,8 @@ def download_song(song: str, background_tasks: BackgroundTasks, request: Request
             
         return {
             "status": "processing",
+            "message": "Song and cover art are processing. Try again in 10-15 seconds."
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
