@@ -9,6 +9,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from mutagen.id3 import ID3, APIC
 
+# Force Python stdout/stderr unbuffering
+os.environ["PYTHONUNBUFFERED"] = "1"
+
 # --- FASTAPI SETUP ---
 app = FastAPI()
 
@@ -51,9 +54,9 @@ def get_existing_cover(file_id: str):
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
     """Downloads audio, extracts metadata, and fetches 1000x1000 cover art via SACAD."""
     try:
-        print(f"--- [START] Downloading song for: {search_query} ---")
+        print(f"--- [START] Processing search query: '{search_query}' ---", flush=True)
         
-        # 1. Run spotDL download with standard flags
+        # 1. Run spotDL with direct console streaming so logs show up live
         download_cmd = [
             sys.executable, "-m", "spotdl", 
             "download", 
@@ -61,17 +64,22 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             "--format", "mp3"
         ]
         
-        result = subprocess.run(download_cmd, cwd=temp_dir, capture_output=True, text=True)
+        print(f"Executing command: {' '.join(download_cmd)}", flush=True)
+        
+        # Directly pass stdout and stderr to server console
+        result = subprocess.run(download_cmd, cwd=temp_dir, stdout=None, stderr=None)
+        
         if result.returncode != 0:
-            print(f"spotDL Execution Failed!\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
+            print(f"--- [ERROR] spotDL process returned non-zero code: {result.returncode} ---", flush=True)
             return
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if not downloaded_files:
-            print("No MP3 file was produced by spotDL.")
+            print("--- [ERROR] No MP3 file found in temp directory after spotDL execution ---", flush=True)
             return
 
         downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
+        print(f"Downloaded MP3 found: {downloaded_files[0]}", flush=True)
         
         # 2. Extract song title, artist, and album from MP3 ID3 tags
         artist_name = "Unknown Artist"
@@ -81,9 +89,9 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             tags = ID3(downloaded_mp3_path)
             artist_name = str(tags.get("TPE1", "Unknown Artist"))
             album_name = str(tags.get("TALB", "Unknown Album"))
-            print(f"Extracted Tags -> Artist: '{artist_name}', Album: '{album_name}'")
+            print(f"Extracted Metadata -> Artist: '{artist_name}', Album: '{album_name}'", flush=True)
         except Exception as tag_err:
-            print(f"Could not read ID3 tags: {tag_err}")
+            print(f"Could not read ID3 tags: {tag_err}", flush=True)
 
         # 3. Fetch 1000x1000 cover art using SACAD
         cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
@@ -97,13 +105,14 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
                     "1000", 
                     cover_output_path
                 ]
-                sacad_res = subprocess.run(sacad_cmd, capture_output=True, text=True)
+                print(f"Running SACAD for high-res artwork...", flush=True)
+                sacad_res = subprocess.run(sacad_cmd, stdout=None, stderr=None)
                 if sacad_res.returncode == 0 and os.path.exists(cover_output_path):
-                    print("SACAD successfully downloaded 1000x1000 cover art!")
+                    print("SACAD successfully downloaded 1000x1000 cover art!", flush=True)
             except Exception as sacad_err:
-                print(f"SACAD error: {sacad_err}")
+                print(f"SACAD execution error: {sacad_err}", flush=True)
 
-        # Fallback: Extract embedded cover art from the MP3 if SACAD didn't save one
+        # Fallback: Extract embedded cover art from MP3 if SACAD didn't save one
         if not os.path.exists(cover_output_path):
             try:
                 tags = ID3(downloaded_mp3_path)
@@ -111,17 +120,17 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
                     if isinstance(tag, APIC):
                         with open(cover_output_path, 'wb') as img_file:
                             img_file.write(tag.data)
-                        print("Fallback: Extracted embedded album cover from MP3!")
+                        print("Fallback: Extracted embedded cover art from downloaded MP3!", flush=True)
                         break
             except Exception as embed_err:
-                print(f"Embedded art fallback error: {embed_err}")
+                print(f"Embedded art fallback error: {embed_err}", flush=True)
 
-        # 4. Move final MP3 to cache directory
+        # 4. Move final MP3 to primary cache directory
         shutil.move(downloaded_mp3_path, audio_path)
-        print(f"--- [SUCCESS] Cached song at: {audio_path} ---")
+        print(f"--- [SUCCESS] Song processing complete! Saved to {audio_path} ---", flush=True)
 
     except Exception as e:
-        print(f"Background Download Error: {e}")
+        print(f"--- [CRASH] Background Download Exception: {e} ---", flush=True)
 
     finally:
         if os.path.exists(temp_dir):
@@ -179,7 +188,7 @@ def download_song(song: str, background_tasks: BackgroundTasks, request: Request
             
         return {
             "status": "processing",
-            "message": "Song and 1000x1000 cover art are processing. Try again in 10-15 seconds."
+            "message": "Song and cover art are processing. Try again in 10-15 seconds."
         }
         
     except Exception as e:
