@@ -1,18 +1,18 @@
-# Use an official Python runtime
 FROM python:3.10-slim
 
-# Install ffmpeg (required by spotDL)
-RUN apt-get update && apt-get install -y ffmpeg
+# Install system dependencies (ffmpeg is required for spotDL/audio encoding)
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
-# Set up the working directory inside the server
 WORKDIR /app
 
-# Copy the requirements file and install Python packages
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all your Python files into the server
 COPY . .
 
-# Command to run your FastAPI app on Render's required port
+EXPOSE 10000
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
