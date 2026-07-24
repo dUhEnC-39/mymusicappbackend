@@ -52,13 +52,13 @@ def get_existing_cover(file_id: str):
     return None
 
 def download_with_ytdlp(search_query: str, temp_dir: str):
-    """Downloads high-res audio using yt-dlp with Node.js JS challenge solver and cookies."""
+    """Downloads high-res audio using yt-dlp with Node.js runtime, client spoofing, and optional cookies."""
     print(f"--- [HIGH-QUAL ENGINE] Fetching high-res audio via yt-dlp for '{search_query}' ---", flush=True)
     
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     cookie_file_path = os.path.join(temp_dir, "youtube_cookies.txt")
     
-    # 1. Read YOUTUBE_COOKIES from Northflank environment variables if set
+    # 1. Check for YOUTUBE_COOKIES in Northflank environment variables
     yt_cookies_data = os.getenv("YOUTUBE_COOKIES")
     use_cookies = False
     
@@ -67,21 +67,21 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
             with open(cookie_file_path, "w", encoding="utf-8") as f:
                 f.write(yt_cookies_data.strip())
             use_cookies = True
-            print("Successfully wrote YouTube authentication cookies to disk.", flush=True)
+            print("Successfully loaded YouTube authentication cookies.", flush=True)
         except Exception as cookie_err:
-            print(f"Failed to write cookie file: {cookie_err}", flush=True)
+            print(f"Cookie notice: {cookie_err}", flush=True)
 
-    # 2. Build yt-dlp command with Node.js runtime flag & Smart TV client
+    # 2. Build yt-dlp command with client spoofing & Node.js solver
     ytdlp_cmd = [
         sys.executable, "-m", "yt_dlp",
         f"ytsearch1:{search_query} audio",
         "-x",
         "--audio-format", "mp3",
-        "--audio-quality", "0",  # Max quality VBR (~250-320 kbps)
+        "--audio-quality", "0",  # Highest VBR quality (~250-320 kbps)
         "-o", output_template,
         "--no-playlist",
-        "--js-runtimes", "node",  # Enables Node.js for solving YouTube JS challenges
-        "--extractor-args", "youtube:player_client=tv_embedded,web_creator"
+        "--js-runtimes", "node",  # Solves YouTube JS challenges using Node.js
+        "--extractor-args", "youtube:player_client=ios,tv_embedded"
     ]
 
     # Attach cookies flag if available
@@ -92,7 +92,7 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
     res = subprocess.run(ytdlp_cmd, stdout=None, stderr=None, timeout=60)
     
     if res.returncode == 0 and any(f.endswith(".mp3") for f in os.listdir(temp_dir)):
-        print("yt-dlp successfully grabbed high-quality audio stream!", flush=True)
+        print("yt-dlp successfully downloaded high-quality audio stream!", flush=True)
         return True
 
     return False
@@ -140,13 +140,13 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         except Exception:
             print("spotDL hit limit or timed out. Switching to yt-dlp engine...", flush=True)
 
-        # 3. Fallback to yt-dlp engine with cookie & TV bypass support
+        # 3. Fallback to anti-bot yt-dlp engine
         if not download_success:
             download_success = download_with_ytdlp(search_query, temp_dir)
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if not download_success or not downloaded_files:
-            print("--- [ERROR] Download engine failed to produce an MP3 ---", flush=True)
+            print("--- [ERROR] All download engines failed to produce an MP3 ---", flush=True)
             with open(failed_marker, "w") as f:
                 f.write("Download engines failed")
             return
