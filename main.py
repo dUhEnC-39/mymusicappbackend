@@ -52,19 +52,43 @@ def get_existing_cover(file_id: str):
     return None
 
 def download_with_ytdlp(search_query: str, temp_dir: str):
-    """Fallback downloader using yt-dlp directly (bypasses Spotify API rate limits)."""
+    """Fallback downloader using yt-dlp directly with iOS/Android client spoofing and SoundCloud backup."""
     print(f"--- [FALLBACK] Attempting direct download via yt-dlp for '{search_query}' ---", flush=True)
+    
+    output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
+    
+    # 1. Try YouTube Search with mobile client spoofing to bypass cloud IP bot checks
     ytdlp_cmd = [
         sys.executable, "-m", "yt_dlp",
         f"ytsearch1:{search_query}",
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", "0",
-        "-o", os.path.join(temp_dir, "downloaded_track.%(ext)s"),
+        "-o", output_template,
+        "--no-playlist",
+        "--extractor-args", "youtube:player_client=ios,android,mweb"
+    ]
+    
+    print(f"Executing yt-dlp (YouTube): {' '.join(ytdlp_cmd)}", flush=True)
+    res = subprocess.run(ytdlp_cmd, stdout=None, stderr=None, timeout=45)
+    
+    if res.returncode == 0 and any(f.endswith(".mp3") for f in os.listdir(temp_dir)):
+        print("yt-dlp (YouTube) successfully downloaded the track!", flush=True)
+        return True
+
+    # 2. If YouTube blocks the cloud IP, fallback to SoundCloud search
+    print("--- [FALLBACK 2] YouTube blocked request. Trying SoundCloud search via yt-dlp... ---", flush=True)
+    ytdlp_sc_cmd = [
+        sys.executable, "-m", "yt_dlp",
+        f"scsearch1:{search_query}",
+        "-x",
+        "--audio-format", "mp3",
+        "--audio-quality", "0",
+        "-o", output_template,
         "--no-playlist"
     ]
-    res = subprocess.run(ytdlp_cmd, stdout=None, stderr=None, timeout=45)
-    return res.returncode == 0
+    res_sc = subprocess.run(ytdlp_sc_cmd, stdout=None, stderr=None, timeout=45)
+    return res_sc.returncode == 0 and any(f.endswith(".mp3") for f in os.listdir(temp_dir))
 
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
     """Downloads audio via spotDL or yt-dlp fallback, extracts metadata, and fetches cover art."""
@@ -174,7 +198,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception as embed_err:
                 print(f"Embedded art fallback notice: {embed_err}", flush=True)
 
-        # 6. Save final MP3 to primary cache directory
+        # 6. Move final MP3 to primary cache directory
         shutil.move(downloaded_mp3_path, audio_path)
         print(f"--- [SUCCESS] Song processing complete! Saved to {audio_path} ---", flush=True)
 
@@ -248,8 +272,3 @@ def download_song(song: str, background_tasks: BackgroundTasks, request: Request
             
         return {
             "status": "processing",
-            "message": "Song and cover art are processing. Try again in 10-15 seconds."
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
