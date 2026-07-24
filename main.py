@@ -52,41 +52,40 @@ def get_existing_cover(file_id: str):
     return None
 
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
-    """Downloads audio, extracts metadata, and fetches cover art with full error trapping."""
+    """Downloads audio with live unbuffered logging and YouTube cloud-block flags."""
     failed_marker = os.path.join(CACHE_DIR, f"{file_id}.failed")
     
     try:
         print(f"--- [START] Processing search query: '{search_query}' ---", flush=True)
         
-        # Clear old failure marker if retrying
+        # Remove previous failure marker if retrying
         if os.path.exists(failed_marker):
             os.remove(failed_marker)
 
-        # 1. spotDL execution command
+        # 1. spotDL command configured for cloud server execution
         download_cmd = [
             sys.executable, "-m", "spotdl", 
             "download", 
             search_query,
-            "--output-format", "mp3"
+            "--output-format", "mp3",
+            "--audio", "youtube-music"
         ]
         
         print(f"Executing: {' '.join(download_cmd)}", flush=True)
         
+        # Using stdout=None and stderr=None streams logs directly to Northflank live!
         result = subprocess.run(
             download_cmd, 
             cwd=temp_dir, 
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.PIPE, 
-            text=True,
-            timeout=120
+            stdout=None, 
+            stderr=None, 
+            timeout=90
         )
         
         if result.returncode != 0:
             print(f"--- [ERROR] spotDL returned exit code {result.returncode} ---", flush=True)
-            print(f"STDERR:\n{result.stderr}", flush=True)
-            print(f"STDOUT:\n{result.stdout}", flush=True)
             with open(failed_marker, "w") as f:
-                f.write(result.stderr or "spotdl failed")
+                f.write(f"spotdl failed with code {result.returncode}")
             return
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
@@ -124,19 +123,16 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
                 print("Running SACAD for high-res artwork...", flush=True)
                 sacad_res = subprocess.run(
                     sacad_cmd, 
-                    stdout=subprocess.PIPE, 
-                    stderr=subprocess.PIPE, 
-                    text=True, 
+                    stdout=None, 
+                    stderr=None, 
                     timeout=30
                 )
                 if sacad_res.returncode == 0 and os.path.exists(cover_output_path):
                     print("SACAD successfully downloaded 1000x1000 cover art!", flush=True)
-                else:
-                    print(f"SACAD returned code {sacad_res.returncode}: {sacad_res.stderr}", flush=True)
             except Exception as sacad_err:
                 print(f"SACAD error: {sacad_err}", flush=True)
 
-        # Fallback: Extract embedded cover art from MP3 if SACAD missed
+        # Fallback: Extract embedded cover art from MP3
         if not os.path.exists(cover_output_path):
             try:
                 tags = ID3(downloaded_mp3_path)
@@ -154,7 +150,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         print(f"--- [SUCCESS] Saved to {audio_path} ---", flush=True)
 
     except subprocess.TimeoutExpired:
-        print("--- [TIMEOUT] Download process timed out after 120s ---", flush=True)
+        print("--- [TIMEOUT] spotDL process timed out after 90s ---", flush=True)
         with open(failed_marker, "w") as f:
             f.write("Timeout expired during download")
 
@@ -166,7 +162,6 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
     finally:
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
-
 
 # --- ENDPOINTS ---
 @app.get("/download-song")
