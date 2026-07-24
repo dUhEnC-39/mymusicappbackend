@@ -89,4 +89,4 @@ def download_song(spotify_url: str, background_tasks: BackgroundTasks):
         }
         
     except Exception as e:
-        raise HTTPException(status
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
