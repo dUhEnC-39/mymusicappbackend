@@ -7,7 +7,7 @@ import subprocess
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from mutagen.id3 import ID3
+from mutagen.id3 import ID3, APIC
 
 # --- FASTAPI SETUP ---
 app = FastAPI()
@@ -49,50 +49,79 @@ def get_existing_cover(file_id: str):
     return None
 
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
-    """Downloads 320kbps audio, extracts metadata, and fetches 1000x1000 cover art via SACAD."""
+    """Downloads audio, extracts metadata, and fetches 1000x1000 cover art via SACAD."""
     try:
-        # 1. Download audio at 320kbps bitrate
-        subprocess.run([
+        print(f"--- [START] Downloading song for: {search_query} ---")
+        
+        # 1. Run spotDL download with standard flags
+        download_cmd = [
             sys.executable, "-m", "spotdl", 
             "download", 
-            search_query, 
-            "--bitrate", "320k",
-            "--ffmpeg-args", "-af volume=2.5"
-        ], cwd=temp_dir, check=True)
+            search_query,
+            "--format", "mp3"
+        ]
         
-        downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
-        if downloaded_files:
-            downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
-            
-            # 2. Extract song title, artist, and album from MP3 ID3 tags
-            artist_name = "Unknown Artist"
-            album_name = "Unknown Album"
-            
-            try:
-                tags = ID3(downloaded_mp3_path)
-                artist_name = str(tags.get("TPE1", "Unknown Artist"))
-                album_name = str(tags.get("TALB", "Unknown Album"))
-            except Exception as tag_err:
-                print(f"Could not read ID3 tags: {tag_err}")
+        result = subprocess.run(download_cmd, cwd=temp_dir, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"spotDL Execution Failed!\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
+            return
 
-            # 3. Fetch 1000x1000 cover art using SACAD with artist and album
-            cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
+        downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
+        if not downloaded_files:
+            print("No MP3 file was produced by spotDL.")
+            return
+
+        downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
+        
+        # 2. Extract song title, artist, and album from MP3 ID3 tags
+        artist_name = "Unknown Artist"
+        album_name = "Unknown Album"
+        
+        try:
+            tags = ID3(downloaded_mp3_path)
+            artist_name = str(tags.get("TPE1", "Unknown Artist"))
+            album_name = str(tags.get("TALB", "Unknown Album"))
+            print(f"Extracted Tags -> Artist: '{artist_name}', Album: '{album_name}'")
+        except Exception as tag_err:
+            print(f"Could not read ID3 tags: {tag_err}")
+
+        # 3. Fetch 1000x1000 cover art using SACAD
+        cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
+        
+        if artist_name != "Unknown Artist" and album_name != "Unknown Album":
             try:
-                subprocess.run([
+                sacad_cmd = [
                     sys.executable, "-m", "sacad", 
                     artist_name, 
                     album_name, 
                     "1000", 
                     cover_output_path
-                ], check=False)
+                ]
+                sacad_res = subprocess.run(sacad_cmd, capture_output=True, text=True)
+                if sacad_res.returncode == 0 and os.path.exists(cover_output_path):
+                    print("SACAD successfully downloaded 1000x1000 cover art!")
             except Exception as sacad_err:
-                print(f"SACAD execution error: {sacad_err}")
+                print(f"SACAD error: {sacad_err}")
 
-            # 4. Move final MP3 to cache directory
-            shutil.move(downloaded_mp3_path, audio_path)
+        # Fallback: Extract embedded cover art from the MP3 if SACAD didn't save one
+        if not os.path.exists(cover_output_path):
+            try:
+                tags = ID3(downloaded_mp3_path)
+                for tag in tags.values():
+                    if isinstance(tag, APIC):
+                        with open(cover_output_path, 'wb') as img_file:
+                            img_file.write(tag.data)
+                        print("Fallback: Extracted embedded album cover from MP3!")
+                        break
+            except Exception as embed_err:
+                print(f"Embedded art fallback error: {embed_err}")
+
+        # 4. Move final MP3 to cache directory
+        shutil.move(downloaded_mp3_path, audio_path)
+        print(f"--- [SUCCESS] Cached song at: {audio_path} ---")
 
     except Exception as e:
-        print(f"Background Download Process Error: {e}")
+        print(f"Background Download Error: {e}")
 
     finally:
         if os.path.exists(temp_dir):
