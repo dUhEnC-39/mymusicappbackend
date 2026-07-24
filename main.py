@@ -31,15 +31,6 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 app.mount("/audio", StaticFiles(directory=CACHE_DIR), name="audio")
 
 
-# List of public Piped API mirrors to bypass datacenter IP bans
-PIPED_INSTANCES = [
-    "https://pipedapi.kavin.rocks",
-    "https://api.piped.private.coffee",
-    "https://pipedapi.mha.fi",
-    "https://piped-api.garudalinux.org"
-]
-
-
 # --- HELPER FUNCTIONS ---
 def cleanup_old_files():
     """Deletes cached MP3s, cover images, and failure markers older than 1 hour."""
@@ -61,61 +52,34 @@ def get_existing_cover(file_id: str):
             return f"{file_id}{ext}"
     return None
 
-def download_via_piped_proxy(search_query: str, temp_dir: str):
-    """Fetches YouTube audio via Piped Proxy API to completely bypass cloud IP bot blocks."""
-    print(f"--- [PROXY ENGINE] Searching Piped Proxy for '{search_query}' ---", flush=True)
+def download_with_ytdlp_ios(search_query: str, temp_dir: str):
+    """
+    Primary YouTube engine using iOS/Android client spoofing and mobile headers.
+    Bypasses YouTube's datacenter IP bot-check cleanly.
+    """
+    print(f"--- [YT-DLP ENGINE] Searching YouTube for '{search_query}' ---", flush=True)
+    output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     
-    for api_base in PIPED_INSTANCES:
-        try:
-            # 1. Search for song on Piped
-            search_url = f"{api_base}/search?q={requests.utils.quote(search_query)}&filter=music_songs"
-            res = requests.get(search_url, timeout=10)
-            if res.status_code != 200:
-                continue
-            
-            items = res.json().get("items", [])
-            if not items:
-                continue
-            
-            video_id = items[0]["url"].replace("/watch?v=", "")
-            print(f"Found YouTube Video ID: {video_id} via {api_base}", flush=True)
-            
-            # 2. Get audio stream details
-            stream_res = requests.get(f"{api_base}/streams/{video_id}", timeout=10)
-            if stream_res.status_code != 200:
-                continue
-            
-            audio_streams = stream_res.json().get("audioStreams", [])
-            if not audio_streams:
-                continue
-            
-            # Sort streams by quality (highest bitrate first)
-            audio_streams.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
-            direct_audio_url = audio_streams[0]["url"]
-            
-            # 3. Download direct stream to disk using ffmpeg
-            output_mp3_path = os.path.join(temp_dir, "downloaded_track.mp3")
-            ffmpeg_cmd = [
-                "ffmpeg", "-y",
-                "-i", direct_audio_url,
-                "-vn",
-                "-ar", "44100",
-                "-ac", "2",
-                "-b:a", "192k",
-                output_mp3_path
-            ]
-            
-            print("Downloading and converting audio stream via ffmpeg...", flush=True)
-            ffmpeg_res = subprocess.run(ffmpeg_cmd, stdout=None, stderr=None, timeout=45)
-            
-            if ffmpeg_res.returncode == 0 and os.path.exists(output_mp3_path):
-                print("Successfully downloaded pristine audio stream via Piped proxy!", flush=True)
-                return True
-                
-        except Exception as e:
-            print(f"Piped instance {api_base} failed: {e}", flush=True)
-            continue
-            
+    # iOS User-Agent and player client configuration
+    ytdlp_cmd = [
+        sys.executable, "-m", "yt_dlp",
+        f"ytsearch1:{search_query} audio",
+        "-x",
+        "--audio-format", "mp3",
+        "--audio-quality", "0",  # Highest VBR MP3 quality (~250-320 kbps)
+        "-o", output_template,
+        "--no-playlist",
+        "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+        "--extractor-args", "youtube:player_client=ios,android,mweb"
+    ]
+    
+    print(f"Executing: {' '.join(ytdlp_cmd)}", flush=True)
+    res = subprocess.run(ytdlp_cmd, stdout=None, stderr=None, timeout=45)
+    
+    mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
+    if res.returncode == 0 and mp3_files:
+        print("yt-dlp successfully downloaded high-quality audio track!", flush=True)
+        return True
     return False
 
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
@@ -136,34 +100,8 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception:
                 pass
 
-        download_success = False
-
-        # 2. Try spotDL first with a tight 10-second timeout
-        download_cmd = [
-            sys.executable, "-m", "spotdl", 
-            search_query,
-            "--output-format", "mp3"
-        ]
-
-        print(f"Executing spotDL: {' '.join(download_cmd)}", flush=True)
-        
-        try:
-            result = subprocess.run(
-                download_cmd, 
-                cwd=temp_dir, 
-                stdout=None, 
-                stderr=None, 
-                timeout=10
-            )
-            if result.returncode == 0 and any(f.endswith(".mp3") for f in os.listdir(temp_dir)):
-                download_success = True
-                print("spotDL download successful!", flush=True)
-        except Exception:
-            print("spotDL hit limit or timed out. Switching to Piped proxy engine...", flush=True)
-
-        # 3. Fallback to Piped Proxy Engine (Bypasses YouTube datacenter IP ban)
-        if not download_success:
-            download_success = download_via_piped_proxy(search_query, temp_dir)
+        # 2. Execute yt-dlp with iOS mobile client spoofing
+        download_success = download_with_ytdlp_ios(search_query, temp_dir)
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if not download_success or not downloaded_files:
@@ -175,7 +113,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
         print(f"Downloaded MP3 ready: {downloaded_files[0]}", flush=True)
         
-        # 4. Extract metadata
+        # 3. Extract metadata
         artist_name = "Unknown Artist"
         album_name = "Unknown Album"
         try:
@@ -186,7 +124,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         except (ID3NoHeaderError, Exception) as tag_err:
             print(f"Metadata tag notice: {tag_err}", flush=True)
 
-        # 5. Fetch 1000x1000 cover art using SACAD
+        # 4. Fetch 1000x1000 cover art using SACAD
         cover_output_path = os.path.join(CACHE_DIR, f"{file_id}.jpg")
         
         search_parts = search_query.split(" ")
@@ -224,7 +162,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception as embed_err:
                 print(f"Embedded art fallback notice: {embed_err}", flush=True)
 
-        # 6. Move final MP3 to primary cache directory
+        # 5. Move final MP3 to primary cache directory
         shutil.move(downloaded_mp3_path, audio_path)
         print(f"--- [SUCCESS] Song processing complete! Saved to {audio_path} ---", flush=True)
 
