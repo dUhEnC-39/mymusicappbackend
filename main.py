@@ -62,7 +62,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         if os.path.exists(failed_marker):
             os.remove(failed_marker)
 
-        # 1. Clear out stale spotDL cache folder to prevent rate-limit loops
+        # 1. Clear out stale spotDL cache folder to force fresh API token fetching
         spotdl_cache_folder = os.path.expanduser("~/.spotdl")
         if os.path.exists(spotdl_cache_folder):
             try:
@@ -71,20 +71,13 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception as cache_err:
                 print(f"Cache clear notice: {cache_err}", flush=True)
 
-        # 2. Build spotDL command using Northflank Spotify credentials
-        client_id = os.getenv("SPOTIPY_CLIENT_ID")
-        client_secret = os.getenv("SPOTIPY_CLIENT_SECRET")
-
+        # 2. Build clean spotDL command
+        # Environment variables (SPOTIPY_CLIENT_ID / SECRET) are passed automatically by Northflank
         download_cmd = [
             sys.executable, "-m", "spotdl", 
             search_query,
-            "--output-format", "mp3",
-            "--no-cache"
+            "--output-format", "mp3"
         ]
-
-        if client_id and client_secret:
-            download_cmd.extend(["--client-id", client_id.strip(), "--client-secret", client_secret.strip()])
-            print("Using custom Spotify Developer credentials.", flush=True)
 
         print(f"Executing: {' '.join(download_cmd)}", flush=True)
         
