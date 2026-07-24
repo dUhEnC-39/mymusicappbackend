@@ -79,23 +79,33 @@ def get_itunes_info(search_query: str):
 
 def download_with_ytdlp(search_query: str, temp_dir: str):
     """
-    Downloads high-res audio via yt-dlp, passing YOUTUBE_COOKIES if configured in Northflank.
+    Downloads high-res audio via yt-dlp.
+    Sanitizes Northflank environment variable newlines into a valid Netscape cookie file.
     """
     output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
     cookie_path = os.path.join(temp_dir, "youtube_cookies.txt")
     
-    # Check for YOUTUBE_COOKIES environment variable
+    # Read and sanitize YOUTUBE_COOKIES environment variable
     cookies_data = os.getenv("YOUTUBE_COOKIES")
     has_cookies = False
 
     if cookies_data:
         try:
+            # Convert Northflank's escaped '\\n' strings into actual multi-line linebreaks
+            formatted_cookies = cookies_data.replace("\\n", "\n").replace("\r\n", "\n").strip()
+            
+            # Ensure mandatory Netscape header is present at the top
+            if not formatted_cookies.startswith("#"):
+                formatted_cookies = "# Netscape HTTP Cookie File\n" + formatted_cookies
+
             with open(cookie_path, "w", encoding="utf-8") as f:
-                f.write(cookies_data.strip())
+                f.write(formatted_cookies)
+            
+            line_count = len(formatted_cookies.splitlines())
             has_cookies = True
-            print("Successfully loaded YouTube authentication cookies from environment variable!", flush=True)
+            print(f"Successfully processed YouTube cookies! ({line_count} lines formatted)", flush=True)
         except Exception as cookie_err:
-            print(f"Cookie write error: {cookie_err}", flush=True)
+            print(f"Cookie formatting error: {cookie_err}", flush=True)
 
     ytdlp_cmd = [
         sys.executable, "-m", "yt_dlp",
@@ -105,7 +115,7 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
         "--audio-quality", "0",
         "-o", output_template,
         "--no-playlist",
-        "--extractor-args", "youtube:player_client=mweb,android,ios"
+        "--extractor-args", "youtube:player_client=web,mweb,ios"
     ]
 
     if has_cookies:
@@ -121,7 +131,7 @@ def download_with_ytdlp(search_query: str, temp_dir: str):
 
     mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
     if res.returncode == 0 and mp3_files:
-        print("yt-dlp successfully downloaded the track!", flush=True)
+        print("yt-dlp successfully grabbed the high-quality audio stream!", flush=True)
         return True
 
     return False
