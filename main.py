@@ -56,17 +56,17 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
     try:
         print(f"--- [START] Processing search query: '{search_query}' ---", flush=True)
         
-        # 1. Run spotDL with direct console streaming so logs show up live
+        # 1. Correct spotDL argument: --output-format mp3
         download_cmd = [
             sys.executable, "-m", "spotdl", 
             "download", 
             search_query,
-            "--format", "mp3"
+            "--output-format", "mp3"
         ]
         
         print(f"Executing command: {' '.join(download_cmd)}", flush=True)
         
-        # Directly pass stdout and stderr to server console
+        # Stream logs directly to console
         result = subprocess.run(download_cmd, cwd=temp_dir, stdout=None, stderr=None)
         
         if result.returncode != 0:
@@ -81,7 +81,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
         downloaded_mp3_path = os.path.join(temp_dir, downloaded_files[0])
         print(f"Downloaded MP3 found: {downloaded_files[0]}", flush=True)
         
-        # 2. Extract song title, artist, and album from MP3 ID3 tags
+        # 2. Extract metadata
         artist_name = "Unknown Artist"
         album_name = "Unknown Album"
         
@@ -105,7 +105,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
                     "1000", 
                     cover_output_path
                 ]
-                print(f"Running SACAD for high-res artwork...", flush=True)
+                print("Running SACAD for high-res artwork...", flush=True)
                 sacad_res = subprocess.run(sacad_cmd, stdout=None, stderr=None)
                 if sacad_res.returncode == 0 and os.path.exists(cover_output_path):
                     print("SACAD successfully downloaded 1000x1000 cover art!", flush=True)
@@ -125,7 +125,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
             except Exception as embed_err:
                 print(f"Embedded art fallback error: {embed_err}", flush=True)
 
-        # 4. Move final MP3 to primary cache directory
+        # 4. Move final MP3 to cache directory
         shutil.move(downloaded_mp3_path, audio_path)
         print(f"--- [SUCCESS] Song processing complete! Saved to {audio_path} ---", flush=True)
 
@@ -135,8 +135,6 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
     finally:
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
-
-
 # --- ENDPOINTS ---
 @app.get("/download-song")
 def download_song(song: str, background_tasks: BackgroundTasks, request: Request):
