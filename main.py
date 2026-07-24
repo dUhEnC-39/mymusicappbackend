@@ -4,6 +4,7 @@ import time
 import shutil
 import re
 import subprocess
+import requests
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +31,15 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 app.mount("/audio", StaticFiles(directory=CACHE_DIR), name="audio")
 
 
+# List of public Piped API mirrors to bypass datacenter IP bans
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://api.piped.private.coffee",
+    "https://pipedapi.mha.fi",
+    "https://piped-api.garudalinux.org"
+]
+
+
 # --- HELPER FUNCTIONS ---
 def cleanup_old_files():
     """Deletes cached MP3s, cover images, and failure markers older than 1 hour."""
@@ -51,50 +61,61 @@ def get_existing_cover(file_id: str):
             return f"{file_id}{ext}"
     return None
 
-def download_with_ytdlp(search_query: str, temp_dir: str):
-    """Downloads high-res audio using yt-dlp with Node.js runtime, client spoofing, and optional cookies."""
-    print(f"--- [HIGH-QUAL ENGINE] Fetching high-res audio via yt-dlp for '{search_query}' ---", flush=True)
+def download_via_piped_proxy(search_query: str, temp_dir: str):
+    """Fetches YouTube audio via Piped Proxy API to completely bypass cloud IP bot blocks."""
+    print(f"--- [PROXY ENGINE] Searching Piped Proxy for '{search_query}' ---", flush=True)
     
-    output_template = os.path.join(temp_dir, "downloaded_track.%(ext)s")
-    cookie_file_path = os.path.join(temp_dir, "youtube_cookies.txt")
-    
-    # 1. Check for YOUTUBE_COOKIES in Northflank environment variables
-    yt_cookies_data = os.getenv("YOUTUBE_COOKIES")
-    use_cookies = False
-    
-    if yt_cookies_data:
+    for api_base in PIPED_INSTANCES:
         try:
-            with open(cookie_file_path, "w", encoding="utf-8") as f:
-                f.write(yt_cookies_data.strip())
-            use_cookies = True
-            print("Successfully loaded YouTube authentication cookies.", flush=True)
-        except Exception as cookie_err:
-            print(f"Cookie notice: {cookie_err}", flush=True)
-
-    # 2. Build yt-dlp command with client spoofing & Node.js solver
-    ytdlp_cmd = [
-        sys.executable, "-m", "yt_dlp",
-        f"ytsearch1:{search_query} audio",
-        "-x",
-        "--audio-format", "mp3",
-        "--audio-quality", "0",  # Highest VBR quality (~250-320 kbps)
-        "-o", output_template,
-        "--no-playlist",
-        "--js-runtimes", "node",  # Solves YouTube JS challenges using Node.js
-        "--extractor-args", "youtube:player_client=ios,tv_embedded"
-    ]
-
-    # Attach cookies flag if available
-    if use_cookies:
-        ytdlp_cmd.extend(["--cookies", cookie_file_path])
-    
-    print(f"Executing yt-dlp: {' '.join(ytdlp_cmd)}", flush=True)
-    res = subprocess.run(ytdlp_cmd, stdout=None, stderr=None, timeout=60)
-    
-    if res.returncode == 0 and any(f.endswith(".mp3") for f in os.listdir(temp_dir)):
-        print("yt-dlp successfully downloaded high-quality audio stream!", flush=True)
-        return True
-
+            # 1. Search for song on Piped
+            search_url = f"{api_base}/search?q={requests.utils.quote(search_query)}&filter=music_songs"
+            res = requests.get(search_url, timeout=10)
+            if res.status_code != 200:
+                continue
+            
+            items = res.json().get("items", [])
+            if not items:
+                continue
+            
+            video_id = items[0]["url"].replace("/watch?v=", "")
+            print(f"Found YouTube Video ID: {video_id} via {api_base}", flush=True)
+            
+            # 2. Get audio stream details
+            stream_res = requests.get(f"{api_base}/streams/{video_id}", timeout=10)
+            if stream_res.status_code != 200:
+                continue
+            
+            audio_streams = stream_res.json().get("audioStreams", [])
+            if not audio_streams:
+                continue
+            
+            # Sort streams by quality (highest bitrate first)
+            audio_streams.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
+            direct_audio_url = audio_streams[0]["url"]
+            
+            # 3. Download direct stream to disk using ffmpeg
+            output_mp3_path = os.path.join(temp_dir, "downloaded_track.mp3")
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-i", direct_audio_url,
+                "-vn",
+                "-ar", "44100",
+                "-ac", "2",
+                "-b:a", "192k",
+                output_mp3_path
+            ]
+            
+            print("Downloading and converting audio stream via ffmpeg...", flush=True)
+            ffmpeg_res = subprocess.run(ffmpeg_cmd, stdout=None, stderr=None, timeout=45)
+            
+            if ffmpeg_res.returncode == 0 and os.path.exists(output_mp3_path):
+                print("Successfully downloaded pristine audio stream via Piped proxy!", flush=True)
+                return True
+                
+        except Exception as e:
+            print(f"Piped instance {api_base} failed: {e}", flush=True)
+            continue
+            
     return False
 
 def run_media_download_background(search_query: str, temp_dir: str, audio_path: str, file_id: str):
@@ -117,7 +138,7 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
 
         download_success = False
 
-        # 2. Try spotDL with a strict 10-second timeout
+        # 2. Try spotDL first with a tight 10-second timeout
         download_cmd = [
             sys.executable, "-m", "spotdl", 
             search_query,
@@ -138,11 +159,11 @@ def run_media_download_background(search_query: str, temp_dir: str, audio_path: 
                 download_success = True
                 print("spotDL download successful!", flush=True)
         except Exception:
-            print("spotDL hit limit or timed out. Switching to yt-dlp engine...", flush=True)
+            print("spotDL hit limit or timed out. Switching to Piped proxy engine...", flush=True)
 
-        # 3. Fallback to anti-bot yt-dlp engine
+        # 3. Fallback to Piped Proxy Engine (Bypasses YouTube datacenter IP ban)
         if not download_success:
-            download_success = download_with_ytdlp(search_query, temp_dir)
+            download_success = download_via_piped_proxy(search_query, temp_dir)
 
         downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
         if not download_success or not downloaded_files:
